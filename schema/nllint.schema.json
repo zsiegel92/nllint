@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "annotation_poll_seconds": {
+      "type": "integer",
+      "format": "uint64",
+      "default": 300,
+      "minimum": 0
+    },
+    "cache_dir": {
+      "type": "string",
+      "default": ".nllint"
+    },
+    "concurrency": {
+      "type": "integer",
+      "format": "uint",
+      "default": 5,
+      "minimum": 1
+    },
+    "exclude": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "include_git_ignored": {
+      "type": "boolean",
+      "default": false
+    },
+    "precondition": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PreconditionConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "project_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "project_root": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "request_timeout_seconds": {
+      "type": "integer",
+      "format": "uint64",
+      "default": 30,
+      "minimum": 0
+    },
+    "rule_sets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RuleSet"
+      },
+      "minItems": 1
+    },
+    "rules_dir": {
+      "type": "string",
+      "default": ".nllint-rules"
+    },
+    "system_prompt": {
+      "type": "string",
+      "default": ".nllint-system.md"
+    },
+    "watch": {
+      "$ref": "#/$defs/WatchConfig",
+      "default": {
+        "debounce_milliseconds": 300
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "rule_sets"
+  ],
+  "$defs": {
+    "PreconditionConfig": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "command"
+      ]
+    },
+    "RuleSet": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "Rule IDs to minimum verdict confidence (0 to 1 inclusive).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "maximum": 1,
+            "minimum": 0
+          },
+          "default": {}
+        },
+        "exclude": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "match": {
+          "description": "File globs relative to the config directory, such as **/*.ts.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "warn": {
+          "description": "Rule IDs to minimum verdict confidence (0 to 1 inclusive).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "maximum": 1,
+            "minimum": 0
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "match"
+      ]
+    },
+    "WatchConfig": {
+      "type": "object",
+      "properties": {
+        "debounce_milliseconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

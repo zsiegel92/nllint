@@ -1,2 +1,11 @@
 scratch/
-**/.DS_Store
+.DS_Store
+/target/
+.nllint/
+.env
+gateway/.env
+.venv/
+__pycache__/
+node_modules/
+dist/
+*.vsix

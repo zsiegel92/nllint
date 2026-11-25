@@ -1,0 +1,89 @@
+{
+	"name": "nllint-vscode",
+	"displayName": "NLLint",
+	"description": "Native VS Code diagnostics from NLLint.",
+	"version": "0.1.0",
+	"publisher": "zsiegel92",
+	"license": "MIT",
+	"type": "module",
+	"engines": {
+		"vscode": "^1.138.0"
+	},
+	"categories": [
+		"Linters"
+	],
+	"keywords": [
+		"nllint",
+		"lint",
+		"linter",
+		"ai"
+	],
+	"main": "./dist/extension.cjs",
+	"activationEvents": [
+		"onStartupFinished",
+		"workspaceContains:.nllintrc.jsonc",
+		"workspaceContains:**/.nllintrc.jsonc"
+	],
+	"extensionKind": [
+		"workspace"
+	],
+	"contributes": {
+		"jsonValidation": [
+			{
+				"fileMatch": ".nllintrc.jsonc",
+				"url": "./schema/nllint.schema.json"
+			}
+		],
+		"commands": [
+			{
+				"command": "nllint.restart",
+				"title": "NLLint: Restart Watchers"
+			},
+			{
+				"command": "nllint.showOutput",
+				"title": "NLLint: Show Output"
+			}
+		],
+		"configuration": {
+			"title": "NLLint",
+			"properties": {
+				"nllint.executablePath": {
+					"type": "string",
+					"default": "nllint",
+					"description": "Path or command name for the NLLint executable."
+				},
+				"nllint.trace.server": {
+					"type": "string",
+					"enum": [
+						"off",
+						"messages",
+						"verbose"
+					],
+					"default": "off",
+					"description": "Controls logging of the NLLint watch protocol."
+				}
+			}
+		}
+	},
+	"scripts": {
+		"build": "tsx scripts/build.ts",
+		"watch": "tsx scripts/build.ts --watch",
+		"typecheck": "tsc --noEmit",
+		"lint": "biome lint .",
+		"format": "biome format --write .",
+		"format:check": "biome format .",
+		"test": "tsx --test src/**/*.test.ts",
+		"check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run test",
+		"package": "pnpm run check && pnpm run build && vsce package --allow-missing-repository --out nllint-vscode.vsix",
+		"install:extension": "pnpm run package && code --install-extension nllint-vscode.vsix --force"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.14",
+		"@types/node": "^26.6.2",
+		"@types/vscode": "^1.138.0",
+		"@vscode/vsce": "^4.0.0",
+		"esbuild": "^0.28.2",
+		"tsx": "^4.23.13",
+		"typescript": "^7.0.2"
+	}
+}
