@@ -4,7 +4,7 @@ The gateway needs a Postgres database, TypeSafe-compatible decision credentials,
 
 ## Prepare Postgres
 
-Use a dedicated database and its direct or session-mode endpoint. Workers use `LISTEN/NOTIFY` and transaction-scoped advisory locks. Run the schema with your migration role:
+Use a dedicated database and its direct or session-mode endpoint. Workers use `LISTEN/NOTIFY` and transaction-scoped advisory locks. Set `DATABASE_MIGRATION_URL` to the migration role DSN and run `make db-migrate` from the repo root. You can also apply the schema directly:
 
 ```sh
 psql "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1 --single-transaction \
@@ -19,7 +19,7 @@ GRANT nllint_runtime TO nllint_login;
 \password nllint_login
 ```
 
-Use that login's DSN for `DATABASE_URL`. Hosted app containers only need the runtime DSN. Each request transaction sets the authenticated user ID locally and assumes the non-owner runtime role. RLS on application tables enforces ownership. Bootstrap and key lookup use narrow database functions. The schema and functions live in [gateway/nllint_gateway/schema.sql](../gateway/nllint_gateway/schema.sql).
+Use that login's DSN for `DATABASE_URL` and verify it with `make db-check`. Hosted app containers only need the runtime DSN. Each request transaction sets the authenticated user ID locally and assumes the non-owner runtime role. RLS on application tables enforces ownership. Bootstrap and key lookup use narrow database functions. The schema and functions live in [gateway/nllint_gateway/schema.sql](../gateway/nllint_gateway/schema.sql).
 
 ## Set secrets and sign-in
 
@@ -42,13 +42,12 @@ For loopback development, leave GitHub settings empty and set `NLLINT_ADMIN_TOKE
 With the Modal CLI signed into your workspace, create a Modal Secret named `nllint-gateway` from the settings above. You can use the dashboard's dotenv import. [Modal Secrets](https://modal.com/docs/guide/secrets)
 
 ```sh
-cd gateway
-npm --prefix web ci
-npm --prefix web run build
-modal deploy modal_app.py
+make deploy
 ```
 
 Use the deployed URL for `NLLINT_APP_URL` and the GitHub callback. If the URL differs from what you configured, update the secret and redeploy. The default URL uses the workspace name and the `nllint-gateway` endpoint label. The app keeps one container warm so deferred jobs run without traffic. Adjust the replica limit to fit your Postgres connection budget. [Modal Web Function URLs](https://modal.com/docs/guide/webhook-urls) [Modal warm containers](https://frontend.modal.com/docs/guide/cold-start)
+
+For a temporary Modal server, use `make modal-serve`. If its public URL differs from the deployment, use a separate Modal secret with the temporary `NLLINT_APP_URL` and matching GitHub OAuth callback. Select it with `NLLINT_MODAL_SECRET=nllint-gateway-dev make modal-serve`. To iterate on the frontend with a Modal backend, use `make modal-api` or an existing deployment and point `make web-dev BACKEND_URL=https://…` at its URL. Enable sign-in for that workflow by setting `NLLINT_REMOTE_DEV_ORIGIN=http://localhost:5175` in the Modal secret. The backend keeps the GitHub callback on its HTTPS origin and returns a short-lived, browser-bound sign-in ticket to Vite.
 
 ## Run on your own host
 

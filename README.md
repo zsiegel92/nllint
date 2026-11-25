@@ -67,17 +67,24 @@ See [the gateway design](docs/gateway.md) for cache identity, queue behavior, an
 
 ## Development
 
-Run `make dev` from the repo root and open `http://localhost:5175`. Vite proxies API requests to FastAPI on port 8080. Both servers reload on source changes. For GitHub sign-in, keep the local callback at `http://localhost:8080/api/session/github/callback` and the gateway returns you to Vite after sign-in.
+Run `make help` for the complete command list. The most common configurations are:
 
+| Configuration | Command |
+| --- | --- |
+| Vite and local FastAPI, both with reload | `make dev` |
+| Vite and local FastAPI in separate terminals | `make api-dev` and `make web-dev` |
+| Built frontend and local FastAPI | `make serve` |
+| Built frontend and a temporary Modal server | `make modal-serve` |
+| Vite and a temporary Modal backend | `make modal-api`, then `make web-dev BACKEND_URL=https://…` with its printed URL |
+| Vite and an already deployed backend | `make web-dev BACKEND_URL=https://…` |
+| Deploy to Modal | `make deploy` or `make deploy-api` |
+| Local detached gateway | `make daemon-start` and `make daemon-stop` |
 
-```sh
-cargo test --locked --workspace
-# Optional integration test against a disposable database with the gateway schema
-(cd gateway && NLLINT_TEST_DATABASE_URL="$test_db_url" uv run --locked python -m unittest discover -s tests)
-npm --prefix gateway/web ci
-npm --prefix gateway/web run build
-(cd ide-extension && pnpm install --frozen-lockfile && pnpm check)
-```
+Vite defaults to [localhost:5175](http://localhost:5175) and FastAPI defaults to port 8080. Use `ENV_FILE`, `API_PORT`, and `WEB_PORT` to override those settings. If you change the local backend port, update `NLLINT_APP_URL` and the GitHub callback to match. For Vite against a hosted gateway, set `NLLINT_REMOTE_DEV_ORIGIN=http://localhost:5175` on the gateway to enable sign-in from that origin. Keep the GitHub callback registered at the gateway's HTTPS URL.
+
+- `make db-migrate` applies the schema using `DATABASE_MIGRATION_URL`. `make db-check` verifies the runtime connection from `DATABASE_URL`.
+- `make cli-build` and `make cli-release` compile the Rust CLI. `make cli-install` installs it. Use `make cli-run ARGS="--dry-run"` or `make cli-watch ARGS="--stream"` to pass flags through.
+- `make test` runs Rust, gateway, and extension tests. Set `NLLINT_TEST_DATABASE_URL` in your shell to include Postgres integration tests against a disposable database with the gateway schema. Use `make check` for Rust and Python static checks.
 
 Regenerate config schemas after changing the Rust settings types:
 

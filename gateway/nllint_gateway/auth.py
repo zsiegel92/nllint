@@ -1,4 +1,5 @@
 import json
+import re
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from hashlib import sha256
 from hmac import compare_digest, digest
@@ -91,19 +92,21 @@ async def operator(
     raise HTTPException(401, "Sign in required")
 
 
-def cookie(response, request, name, value, max_age, path):
+def cookie(response, request, name, value, max_age, path, *, secure=None):
     response.set_cookie(
         name,
         value,
         max_age=max_age,
         httponly=True,
-        secure=request.app.state.settings.nllint_app_url.startswith("https://"),
+        secure=secure
+        if secure is not None
+        else request.app.state.settings.nllint_app_url.startswith("https://"),
         samesite="lax",
         path=path,
     )
 
 
-async def issue_session(request, response, user_id):
+async def issue_session(request, response, user_id, *, secure=None):
     await request.app.state.db.register(user_id)
     claims = {"id": user_id, "exp": int(time()) + SESSION_SECONDS}
     cookie(
@@ -113,6 +116,7 @@ async def issue_session(request, response, user_id):
         pack(claims, "session", request),
         SESSION_SECONDS,
         "/api",
+        secure=secure,
     )
 
 
@@ -122,7 +126,12 @@ class Login(BaseModel):
 
 @session_router.get("/method")
 async def method(request: Request):
-    return {"github": request.app.state.settings.oauth_enabled}
+    settings = request.app.state.settings
+    return {
+        "github": settings.oauth_enabled,
+        "app_url": settings.nllint_app_url,
+        "remote_dev_origin": settings.nllint_remote_dev_origin,
+    }
 
 
 @session_router.get("")
@@ -181,6 +190,12 @@ async def github_start(request: Request):
         return RedirectResponse(
             f"{start_url}?{urlencode({'next': destination})}", status_code=303
         )
+    dev_challenge = request.query_params.get("dev_challenge")
+    if dev_challenge is not None and (
+        not settings.nllint_remote_dev_origin
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", dev_challenge)
+    ):
+        raise HTTPException(400, "Remote Vite sign-in is unavailable")
     nonce, verifier = token_urlsafe(32), token_urlsafe(32)
     challenge = (
         urlsafe_b64encode(sha256(verifier.encode()).digest()).rstrip(b"=").decode()
@@ -199,6 +214,7 @@ async def github_start(request: Request):
         "nonce": nonce,
         "verifier": verifier,
         "destination": destination,
+        "dev_challenge": dev_challenge,
         "exp": int(time()) + 600,
     }
     cookie(
@@ -263,8 +279,58 @@ async def github_callback(request: Request, code: str = "", state: str = ""):
         raise HTTPException(502, "GitHub sign-in failed") from error
     if not settings.allows(user_id):
         raise HTTPException(403, "This GitHub account is outside the gateway allowlist")
+    if (
+        dev_challenge := claims.get("dev_challenge")
+    ) and settings.nllint_remote_dev_origin:
+        ticket = pack(
+            {
+                "id": user_id,
+                "challenge": dev_challenge,
+                "origin": settings.nllint_remote_dev_origin,
+                "exp": int(time()) + 60,
+            },
+            "dev-session",
+            request,
+        )
+        response = RedirectResponse(
+            settings.nllint_remote_dev_origin
+            + "/#"
+            + urlencode({"dev_ticket": ticket}),
+            status_code=303,
+        )
+        response.delete_cookie(OAUTH_STATE, path=CALLBACK)
+        return response
     destination = (settings.nllint_dev_ui_url or "") + claims["destination"]
     response = RedirectResponse(destination, status_code=303)
     response.delete_cookie(OAUTH_STATE, path=CALLBACK)
     await issue_session(request, response, user_id)
     return response
+
+
+class DevExchange(BaseModel):
+    ticket: str = Field(max_length=4096)
+    verifier: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
+
+
+@session_router.post("/dev/exchange", status_code=204)
+async def exchange_dev_session(body: DevExchange, request: Request, response: Response):
+    settings = request.app.state.settings
+    origin = settings.nllint_remote_dev_origin
+    if (
+        not origin
+        or request.headers.get("origin") != origin
+        or request.headers.get("X-NLLint-UI") != "1"
+    ):
+        raise HTTPException(403, "Remote Vite sign-in is unavailable for this origin")
+    claims = unpack(body.ticket, "dev-session", request)
+    challenge = (
+        urlsafe_b64encode(sha256(body.verifier.encode()).digest()).rstrip(b"=").decode()
+    )
+    if (
+        not claims
+        or claims["origin"] != origin
+        or not settings.allows(claims["id"])
+        or not compare_digest(challenge, claims["challenge"])
+    ):
+        raise HTTPException(401, "Remote Vite sign-in expired or could not be verified")
+    await issue_session(request, response, claims["id"], secure=False)

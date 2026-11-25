@@ -248,7 +248,7 @@ class GatewayTest(unittest.TestCase):
         from nllint_gateway.db import Database
         from nllint_gateway.settings import Settings
 
-        db = await Database.open(Settings())
+        db = await Database.open(Settings.from_env())
         try:
             async with db.tenant(user, readonly=True) as conn:
                 self.assertEqual(

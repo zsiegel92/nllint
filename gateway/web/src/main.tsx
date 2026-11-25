@@ -10,6 +10,11 @@ const url = new URLSearchParams(location.search);
 const traceId = url.get('traceId');
 const findRun = url.get('findRun');
 const pageSize = 20;
+const devVerifierKey = 'nllint.dev-verifier';
+
+function base64Url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+}
 const issues = {
   all: 'All traces',
   'no-ranges': 'Positive file, no ranges',
@@ -23,26 +28,54 @@ const issues = {
 function App() {
   const [authenticated, setAuthenticated] = useState<boolean>();
   const api = useMemo(() => new Api(), []);
+  const [loginError, setLoginError] = useState('');
   useEffect(() => {
-    api.json<{authenticated: boolean}>('/session').then(result => setAuthenticated(result.authenticated)).catch(() => setAuthenticated(false));
+    async function checkSession() {
+      const ticket = new URLSearchParams(location.hash.slice(1)).get('dev_ticket');
+      if (ticket) {
+        history.replaceState(null, '', location.pathname + location.search);
+        const verifier = sessionStorage.getItem(devVerifierKey);
+        sessionStorage.removeItem(devVerifierKey);
+        if (!verifier) throw new Error('Start remote sign-in again in this tab.');
+        await api.request('/session/dev/exchange', 'POST', {ticket, verifier});
+      }
+      const session = await api.json<{authenticated: boolean}>('/session');
+      setAuthenticated(session.authenticated);
+    }
+    checkSession().catch(error => {setLoginError(error.message); setAuthenticated(false);});
   }, [api]);
   if (authenticated === undefined) return <main className="entry"><p role="status">Checking session…</p></main>;
-  if (!authenticated) return <Login api={api} login={() => setAuthenticated(true)}/>;
+  if (!authenticated) return <Login api={api} initialError={loginError} login={() => setAuthenticated(true)}/>;
   if (findRun) return <FindRanges api={api} run={findRun}/>;
   return <Workspace api={api} logout={() => {
     api.request('/session', 'DELETE').then(() => setAuthenticated(false));
   }}/>;
 }
 
-function Login({api, login}: {api: Api; login: () => void}) {
+type SignInMethod = {github: boolean; app_url: string; remote_dev_origin: string | null};
+
+function Login({api, login, initialError}: {api: Api; login: () => void; initialError: string}) {
   const [token, setToken] = useState('');
-  const [github, setGithub] = useState<boolean>();
-  useEffect(() => {
-    api.json<{github: boolean}>('/session/method').then(method => setGithub(method.github))
-      .catch(error => setError(error.message));
-  }, [api]);
-  const [error, setError] = useState('');
+  const [method, setMethod] = useState<SignInMethod>();
+  const [error, setError] = useState(initialError);
   const [waiting, setWaiting] = useState(false);
+  useEffect(() => {
+    api.json<SignInMethod>('/session/method').then(setMethod).catch(error => setError(error.message));
+  }, [api]);
+
+  async function remoteSignIn(method: SignInMethod) {
+    try {
+      const verifier = base64Url(crypto.getRandomValues(new Uint8Array(32)));
+      const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+      sessionStorage.setItem(devVerifierKey, verifier);
+      const start = new URL('/api/session/github/start', method.app_url);
+      start.searchParams.set('dev_challenge', base64Url(new Uint8Array(hash)));
+      location.assign(start);
+    } catch (error) {
+      setError((error as Error).message);
+    }
+  }
+
   function submit(event: FormEvent) {
     event.preventDefault();
     setWaiting(true);
@@ -50,11 +83,15 @@ function Login({api, login}: {api: Api; login: () => void}) {
       .catch(error => setError(error.message)).finally(() => setWaiting(false));
   }
   const signIn = '/api/session/github/start?' + new URLSearchParams({next: location.pathname + location.search});
+  const remote = Boolean(method?.app_url && location.hostname === 'localhost' && new URL(method.app_url).protocol === 'https:');
   return <main className="entry"><form className="entry-card" onSubmit={submit}>
     <div className="brand"><img className="brand-icon" src="/favicon.ico" alt=""/> NLLint Gateway</div>
     <h1>Sign in</h1>
-    {github === true && <a className="primary button-link" href={signIn}>Continue with GitHub</a>}
-    {github === false && <>
+    {method?.github && !remote && <a className="primary button-link" href={signIn}>Continue with GitHub</a>}
+    {method?.github && remote && (method.remote_dev_origin === location.origin
+      ? <button type="button" className="primary" onClick={() => remoteSignIn(method)}>Continue with GitHub</button>
+      : <p>Set NLLINT_REMOTE_DEV_ORIGIN to {location.origin} on the backend to use GitHub from Vite.</p>)}
+    {method?.github === false && <>
       <label>Local development token<input type="password" autoComplete="current-password" required
         value={token} onChange={event => setToken(event.target.value)}/></label>
       <button className="primary" disabled={waiting}>Continue</button>

@@ -23,7 +23,7 @@ WEB = Path(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    settings = Settings()
+    settings = Settings.from_env()
     app.state.settings = settings
     app.state.routing = Routing(settings)
     async with AsyncExitStack() as stack:

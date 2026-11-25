@@ -5,7 +5,8 @@ import modal
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web" / "dist"
-if not (WEB / "index.html").is_file():
+API_ONLY = os.getenv("NLLINT_MODAL_API_ONLY") == "1"
+if not API_ONLY and not (WEB / "index.html").is_file():
     raise RuntimeError(
         "Build the control plane with npm --prefix web ci && npm --prefix web run build"
     )
@@ -19,8 +20,10 @@ image = (
     .add_local_file(
         ROOT / "nllint_gateway" / "schema.sql", "/root/nllint_gateway/schema.sql"
     )
-    .add_local_dir(WEB, "/opt/nllint/web")
 )
+
+if not API_ONLY:
+    image = image.add_local_dir(WEB, "/opt/nllint/web")
 
 
 @app.function(

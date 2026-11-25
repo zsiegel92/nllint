@@ -3,6 +3,8 @@ import logging
 from contextlib import suppress
 from datetime import timedelta
 
+from httpx import HTTPStatusError
+
 from .contracts import source_lines
 from .db import notify_work
 
@@ -140,7 +142,7 @@ class Worker:
         except Exception as error:
             # Provider payloads and model inputs can contain source code.
             error_type = type(error).__name__
-            if getattr(error, "response", None) is not None:
+            if isinstance(error, HTTPStatusError):
                 error_type += f" ({error.response.status_code})"
             LOG.warning("stage=%s runs=%s failure=%s", stage, selected, error_type)
             await conn.execute(

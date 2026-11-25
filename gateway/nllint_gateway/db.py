@@ -24,10 +24,16 @@ class Database:
     async def open(cls, settings: Settings):
         if settings.database_migration_url is not None:
             await migrate(settings.database_migration_url.get_secret_value())
+        return await cls.connect(
+            settings.database_url.get_secret_value(), settings.nllint_worker_slots
+        )
+
+    @classmethod
+    async def connect(cls, url: str, workers: int = 0):
         pool = await asyncpg.create_pool(
-            settings.database_url.get_secret_value(),
+            url,
             min_size=1,
-            max_size=settings.nllint_worker_slots + 8,
+            max_size=workers + 8,
         )
         db = cls(pool)
         try:
