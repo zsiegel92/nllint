@@ -43,11 +43,6 @@ pre { margin: .5rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .page-heading { margin-bottom: 1.15rem; }
 .page-heading h1 { margin: 0; }
 .trace-intro { margin: .35rem 0 0; }
-.export { display: inline-flex; align-items: stretch; flex-wrap: wrap; border: 1px solid #a8b9b1; border-radius: 6px; background: white; }
-.export select, .export button { border: 0; min-width: 0; }
-.export select { border-radius: 5px 0 0 5px; }
-.export button { border-left: 1px solid var(--line); border-radius: 0 5px 5px 0; white-space: nowrap; }
-.export :focus-visible { outline-offset: -2px; }
 .segmented, .label-buttons, .line-fields, .range-chips, .panel-links { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
 .filters { display: flex; gap: .75rem; flex-wrap: wrap; margin: 1.05rem 0; }
 .filters > label { min-width: 9rem; flex: 1; }
@@ -181,7 +176,6 @@ td > :is(.stage-card, .annotation-verdict) + :is(.stage-card, .annotation-verdic
 .agent-result { border-inline-start: 3px solid #8554b3; }
 .range-marker[data-state="agent"], .range-legend i[data-state="agent"] { background: #8554b3; }
 
-.export label { display: flex; align-items: center; padding: .35rem .6rem; border-left: 1px solid var(--line); }
 .agent-controls { justify-content: flex-start; }
 .agent-controls label { display: flex; align-items: center; gap: .5rem; }
 .range-marker[data-reviewed="true"], .range-legend i[data-reviewed="true"] { border-right: 2px solid #253f38; }
@@ -189,7 +183,11 @@ td > :is(.stage-card, .annotation-verdict) + :is(.stage-card, .annotation-verdic
 
 .disclosure { border: 1px solid var(--line); border-radius: 8px; padding: .65rem .85rem; margin-block: .6rem; }
 .trace-data-actions { display: flex; align-items: flex-start; gap: .6rem; flex-wrap: wrap; }
-.trace-data-actions > .disclosure[open] { flex-basis: 100%; }
+.trace-data-actions > .disclosure[open] { flex-basis: 100%; min-width: 0; }
+.trace-export-form { display: grid; gap: .65rem; margin-top: .65rem; justify-items: start; }
+.trace-export-form p { margin: 0; }
+.trace-export-fields { display: flex; flex-wrap: wrap; gap: .55rem 1rem; align-items: center; min-width: 0; max-width: 100%; }
+.trace-export-fields label, .trace-export-fields select { min-width: 0; max-width: 100%; }
 .disclosure summary { cursor: pointer; font-weight: 650; }
 .trace-selection { display: inline-flex; align-items: center; gap: .35rem; }
 .eval-counts { display: flex; flex-wrap: wrap; gap: .7rem; }
@@ -215,5 +213,4 @@ td > :is(.stage-card, .annotation-verdict) + :is(.stage-card, .annotation-verdic
 .disclosure label small { max-width: 19rem; }
 @media (max-width: 560px) {
   .topbar nav { flex-wrap: wrap; }
-  .export { max-width: 100%; }
 }

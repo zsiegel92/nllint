@@ -1,4 +1,3 @@
-import type {Selection} from './evaluation';
 import {AgentResults} from './agentic';
 import {useEffect, useMemo, useState} from 'react';
 import * as ToggleGroup from '@radix-ui/react-toggle-group';
@@ -11,7 +10,7 @@ import {ReviewStages} from './stage-selector';
 import {AnnotationVerdict, LabelButtons, RangeLink, rangeStatus, SourceReview} from './source-review';
 import type {SaveRange} from './source-review';
 import {Api, attribution, label, probability} from './api';
-import type {AnnotationEvent, Cell, History, Label, Mode, ProviderHistory, Range, ReviewMode, Run, Trace} from './api';
+import type {AnnotationEvent, Cell, History, Label, Mode, ProviderHistory, Range, ReviewMode, Run, Trace, TraceSelection} from './api';
 
 function Verdict({decision, confidence}: {decision: Label; confidence?: number | null}) {
   return <span className={`badge ${decision === null ? 'neutral' : decision ? 'violation' : 'clear'}`}>
@@ -72,7 +71,7 @@ function RangeResults({trace, cell, stages, open, language}: {
 export function Matrix({traces, stages, open, openFile, onRule, languages, traceLink, selectedRules, runAgent, agentBusy, selected, onSelect, compareLink}: {
   traces: Trace[]; stages: Mode[]; open: OpenReview; openFile: (trace: Trace) => void;
   languages: Partial<Record<string, Language>>; traceLink: (trace: Trace) => string;
-  selected: Set<string>; onSelect: (item: Selection) => void; compareLink: (trace: Trace) => string;
+  selected: Set<string>; onSelect: (item: TraceSelection) => void; compareLink: (trace: Trace) => string;
   runAgent?: (ids: number[]) => void; agentBusy: boolean;
   onRule: (version: string) => void; selectedRules: string[];
 }) {
@@ -110,7 +109,7 @@ export function Matrix({traces, stages, open, openFile, onRule, languages, trace
             onChange={() => onSelect({trace_id: trace.id, run_id: cell.run_id})}/>
             Select <span className="sr-only">{cell.rule_id} for {trace.file_path}</span></label>
           {stages.includes('files') && <section className="stage-card">
-            <div className="stage-card-heading"><strong>Pipeline file check</strong>
+            <div className="stage-card-heading"><strong>File-level check</strong>
               <button type="button" className="icon-action" aria-label={`Review file decision for ${cell.rule_id}`}
                 onClick={() => open(trace, cell, 'files')}><Pencil size={14} aria-hidden="true"/></button></div>
             <div className="pipeline-verdict"><FileVerdict cell={cell}/></div>
@@ -216,7 +215,7 @@ function RuleCard({api, trace, cell, focused, canAnnotate, saveFile, busy, refre
     <div className="review-rule-header">
       <div className="review-rule-summary">
         <span className="review-rule-name"><strong>{cell.rule_id}</strong><small>{cell.rule_path}</small></span>
-        <span className="pipeline-verdict"><small>Pipeline file check</small><FileVerdict cell={cell}/></span>
+        <span className="pipeline-verdict"><small>File-level check</small><FileVerdict cell={cell}/></span>
         <AnnotationVerdict identity={cell.labeler_identity} decision={cell.file_label}/>
         {canAnnotate && <LabelButtons active={cell.file_label} disabled={busy} save={decision => saveFile(cell, decision)}/>}
       </div>

@@ -62,7 +62,7 @@ export const navigation = {
   maxConfidence: parseAsString.withDefault(''),
   extraIssue: parseAsString.withDefault(''),
   match: parseAsStringLiteral(['all', 'any']).withDefault('all'),
-  includeAgentic: parseAsInteger.withDefault(0),
+  includeAgentic: parseAsInteger,
   page: parseAsInteger.withDefault(0),
   exportKind: parseAsStringLiteral(exportKinds).withDefault('adjudication'),
   run: parseAsInteger,

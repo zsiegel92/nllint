@@ -1,12 +1,10 @@
 import {useEffect, useState} from 'react';
-import type {FormEvent, ReactNode} from 'react';
-import {annotationSources} from './api';
-import type {Api, Labeler} from './api';
+import type {FormEvent} from 'react';
+import type {Api, Labeler, TraceSelection} from './api';
 import {Link} from 'react-router';
 import {gatewayQuery, tracePath} from './navigation';
 import {RulePicker} from './rule-picker';
 
-export type Selection = {trace_id: string; run_id: number};
 type EvalSet = {id: number; name: string; examples: number; baseline_rule_version: string};
 type Span = {start: number; end: number};
 type Score = {
@@ -21,17 +19,12 @@ type Score = {
   more: boolean;
 };
 
-export function DatasetActions({api, selection, labelers, onError, matchingOnPage, onSelectPage, onClear, scopeDownload}: {
-  api: Api; selection: Selection[]; labelers: Labeler[]; onError: (message: string) => void;
-  matchingOnPage: number; onSelectPage: () => void; onClear: () => void; scopeDownload: ReactNode;
+export function SelectionActions({api, selection, labelers, onError, matchingOnPage, onSelectPage, onClear}: {
+  api: Api; selection: TraceSelection[]; labelers: Labeler[]; onError: (message: string) => void;
+  matchingOnPage: number; onSelectPage: () => void; onClear: () => void;
 }) {
   const [name, setName] = useState('');
   const [reference, setReference] = useState('');
-  const [exportAgent, setExportAgent] = useState('');
-  const [includeAgentic, setIncludeAgentic] = useState(true);
-  const [includeHistory, setIncludeHistory] = useState(false);
-  const [includeReview, setIncludeReview] = useState(true);
-  const [reviewerOrigin, setReviewerOrigin] = useState('');
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   async function saveSet(event: FormEvent) {
@@ -50,76 +43,30 @@ export function DatasetActions({api, selection, labelers, onError, matchingOnPag
       setBusy(false);
     }
   }
-  async function download() {
-    setBusy(true);
-    try {
-      const response = await api.request('/export/selection', 'POST', {
-        selection, include_agentic: includeAgentic, include_history: includeHistory,
-        include_review: includeReview, reviewer_origin: reviewerOrigin || null,
-        agent_labeler_ids: exportAgent ? [Number(exportAgent)] : [],
-      });
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(await response.blob());
-      link.download = 'nllint-selection.jsonl';
-      link.click();
-      window.setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-    } catch (error) {
-      onError((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-  return <div className="trace-data-actions">
-    <details className="disclosure">
-      <summary>Export trace data</summary>
-      <p>Download JSONL for the current project, API key, rule, or trace. To export matches from Find or Advanced filters, add them to your selection.</p>
-      {scopeDownload}
-    </details>
-    <details className="disclosure">
-      <summary>Selected runs{selection.length > 0 && ` (${selection.length})`}</summary>
-      <div className="selection-controls">
-        <p>Select individual rule results in the table or add this page’s matches. Selections carry across pages until you reload.</p>
-        <div className="selection-button-group" role="group" aria-label="Manage selected runs">
-          <button type="button" disabled={!matchingOnPage || selection.length >= 250} onClick={onSelectPage}>Add page matches</button>
-          <button type="button" disabled={!selection.length} onClick={onClear}>Clear selection</button>
-        </div>
+  return <details className="disclosure">
+    <summary>Build eval set{selection.length > 0 && ` (${selection.length} selected)`}</summary>
+    <div className="selection-controls">
+      <p>Select individual rule results in the table or add this page’s matches. Selections carry across pages until you reload.</p>
+      <div className="selection-button-group" role="group" aria-label="Manage selected runs">
+        <button type="button" disabled={!matchingOnPage || selection.length >= 250} onClick={onSelectPage}>Add page matches</button>
+        <button type="button" disabled={!selection.length} onClick={onClear}>Clear selection</button>
       </div>
-      {selection.length === 250 && <p role="status">250 runs selected. Deselect some to add more.</p>}
-      {selection.length > 0 && <div className="selected-run-actions">
-        <section className="selection-section" aria-labelledby="download-selected">
-          <h3 id="download-selected">Download selected runs</h3>
-          <p>Download a JSONL file with pipeline results and the labels you choose below.</p>
-          <div className="matrix-bar agent-controls">
-            <label>Agent results to export<select value={exportAgent} disabled={!includeAgentic} onChange={event => setExportAgent(event.target.value)}>
-              <option value="">All saved agents</option>
-              {labelers.map(item => <option key={item.id} value={item.id}>{item.name} · {item.model}</option>)}
-            </select></label>
-            <label><input type="checkbox" checked={includeAgentic} onChange={event => setIncludeAgentic(event.target.checked)}/>Include agent results</label>
-            <label><input type="checkbox" checked={includeReview} onChange={event => setIncludeReview(event.target.checked)}/>Include current annotations</label>
-            <label>Annotation source <select disabled={!includeReview && !includeHistory} value={reviewerOrigin} onChange={event => setReviewerOrigin(event.target.value)}>
-              <option value="">Any source</option>
-              {Object.entries(annotationSources).map(([origin, name]) => <option key={origin} value={origin}>{name}</option>)}
-            </select></label>
-            <label><input type="checkbox" checked={includeHistory} onChange={event => setIncludeHistory(event.target.checked)}/>Include annotation history</label>
-            <button type="button" disabled={busy || !selection.length} onClick={() => void download()}>Download .jsonl</button>
-          </div>
-        </section>
-        <section className="selection-section" aria-label="Save an evaluation set">
-          <h3>Save an evaluation set</h3>
-          <p>Keep a copy of the expected answers so you can score later revisions of this rule on the same files. Select runs from one rule revision. Each needs a file annotation or a result from the chosen labeler.</p>
-          <form className="create-project" onSubmit={saveSet}>
-            <label>Evaluation set name<input required maxLength={120} value={name} onChange={event => setName(event.target.value)}/></label>
-            <label>Reference labels<select value={reference} onChange={event => setReference(event.target.value)}>
-              <option value="">Current file annotations</option>
-              {labelers.map(item => <option key={item.id} value={item.id}>{item.name} · {item.model}</option>)}
-            </select></label>
-            <button className="primary" disabled={busy || !name.trim() || !selection.length}>Save evaluation set</button>
-          </form>
-          {status && <p role="status">{status} · <Link to="/eval-sets">View evaluation sets</Link></p>}
-        </section>
-      </div>}
-    </details>
-  </div>;
+    </div>
+    {selection.length === 250 && <p role="status">250 runs selected. Deselect some to add more.</p>}
+    {selection.length > 0 && <section className="selection-section" aria-label="Save an evaluation set">
+      <h3>Save an evaluation set</h3>
+      <p>Keep a copy of the expected answers so you can score later revisions of this rule on the same files. Select runs from one rule revision. Each needs a file annotation or a result from the chosen labeler.</p>
+      <form className="create-project" onSubmit={saveSet}>
+        <label>Evaluation set name<input required maxLength={120} value={name} onChange={event => setName(event.target.value)}/></label>
+        <label>Reference labels<select value={reference} onChange={event => setReference(event.target.value)}>
+          <option value="">Current file annotations</option>
+          {labelers.map(item => <option key={item.id} value={item.id}>{item.name} · {item.model}</option>)}
+        </select></label>
+        <button className="primary" disabled={busy || !name.trim() || !selection.length}>Save evaluation set</button>
+      </form>
+      {status && <p role="status">{status} · <Link to="/eval-sets">View evaluation sets</Link></p>}
+    </section>}
+  </details>;
 }
 
 const fileLabels: Record<string, string> = {
@@ -175,7 +122,7 @@ export function EvalSets({api, onError}: {api: Api; onError: (message: string) =
   }
   return <>
     <h1>Evaluation sets</h1>
-    <p>Compare rule revisions on the same source using saved expected answers. Create a set from Selected runs in Traces.</p>
+    <p>Compare rule revisions on the same source using saved expected answers. To create a set, open <strong>Build eval set</strong> in Traces.</p>
     {sets.length ? <table><thead><tr><th>Set</th><th>Examples</th><th>Download</th></tr></thead>
       <tbody>{sets.map(item => <tr key={item.id}>
         <td>{item.name}</td><td>{item.examples}</td><td><a href={`/api/eval-sets/${item.id}/export`}>Export JSONL</a></td>

@@ -7,8 +7,8 @@ import {RulePicker} from './rule-picker';
 
 type TraceQuery = ReturnType<typeof useQueryStates<typeof navigation>>;
 
-export function traceSearchParams(scope: URLSearchParams, query: TraceQuery[0], {traceId, limit, offset}: {
-  traceId?: string; limit: number; offset: number;
+export function traceSearchParams(scope: URLSearchParams, query: TraceQuery[0], {limit, offset}: {
+  limit: number; offset: number;
 }) {
   const {issue, sort} = query;
   const traceParams = new URLSearchParams(scope);
@@ -25,7 +25,6 @@ export function traceSearchParams(scope: URLSearchParams, query: TraceQuery[0], 
   traceParams.set('sort', sort);
   traceParams.set('limit', String(limit));
   traceParams.set('offset', String(offset));
-  if (traceId) traceParams.set('trace_id', traceId);
   return traceParams;
 }
 

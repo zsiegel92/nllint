@@ -1,5 +1,5 @@
-import {DatasetActions, EvalSets} from './evaluation';
-import type {Selection} from './evaluation';
+import {EvalSets, SelectionActions} from './evaluation';
+import {TraceExport} from './trace-export';
 import {LabelerSettings} from './agentic';
 import {Keys, ModelSettings} from './settings';
 import {TraceFilters, traceSearchParams} from './trace-filters';
@@ -9,9 +9,9 @@ import {createRoot} from 'react-dom/client';
 import {useQueryStates} from 'nuqs';
 import {BrowserRouter, Link, matchRoutes, useLocation, useNavigate} from 'react-router';
 import {NuqsAdapter} from 'nuqs/adapters/react-router/v7';
-import {closedReview, exportKinds, findRangesPath, gatewayQuery, modelsPath, navigation, rangeParam, routes, sectionPaths, tracePath} from './navigation';
+import {closedReview, findRangesPath, gatewayQuery, modelsPath, navigation, rangeParam, routes, sectionPaths, tracePath} from './navigation';
 import {Api} from './api';
-import type {Cell, Key, Label, Labeler, Project, Range, ReviewMode, Run, Trace} from './api';
+import type {Cell, Key, Label, Labeler, Project, Range, ReviewMode, Run, Trace, TraceSelection} from './api';
 import type {Section} from './navigation';
 import {isLanguage, languageForPath} from './code';
 import {Matrix, ReviewPanel} from './review';
@@ -206,10 +206,10 @@ function Workspace({api, logout, section, project, traceId, models}: {
 }) {
   const navigate = useNavigate();
   const [query, setQuery] = useQueryStates(navigation, {history: 'push'});
-  const {mode, stages, key, rule, rules, exportKind} = query;
+  const {mode, stages, key, rule, rules} = query;
   const page = Math.max(0, query.page);
   const selectedTrace = query.reviewTrace ?? (query.run ? traceId : undefined);
-  const [selection, setSelection] = useState<Selection[]>([]);
+  const [selection, setSelection] = useState<TraceSelection[]>([]);
   const [labelers, setLabelers] = useState<Labeler[]>([]);
   const agentBatch = useRef<{stop: boolean} | null>(null);
   const [agentProgress, setAgentProgress] = useState<{done: number; total: number; stopping: boolean}>();
@@ -252,15 +252,16 @@ function Workspace({api, logout, section, project, traceId, models}: {
     const params = new URLSearchParams();
     if (key) params.set('key_id', key);
     if (project) params.set('project', project);
+    if (traceId) params.set('trace_id', traceId);
     if (rule.trim()) params.set('rule', rule.trim());
     for (const version of rules) params.append('rule_version', version);
     return params;
-  }, [key, project, rule, rules]);
+  }, [key, project, traceId, rule, rules]);
   const ruleScope = new URLSearchParams();
   if (project) ruleScope.set('project', project);
   if (key) ruleScope.set('key_id', key);
   if (traceId) ruleScope.set('trace_id', traceId);
-  const traceParams = traceSearchParams(scope, query, {traceId, limit: pageSize, offset: page * pageSize});
+  const traceParams = traceSearchParams(scope, query, {limit: pageSize, offset: page * pageSize});
   const traceRequest = `/traces?${traceParams}`;
   const data = tracePage?.path === traceRequest ? tracePage : undefined;
   useEffect(() => {
@@ -309,30 +310,6 @@ function Workspace({api, logout, section, project, traceId, models}: {
     }).catch(error => setError(error.message)).finally(() => setBusy(false));
   }
 
-  async function download() {
-    setError('');
-    try {
-      const params = new URLSearchParams(scope);
-      if (traceId) params.set('trace_id', traceId);
-      if (query.includeAgentic) params.set('include_agentic', 'true');
-      const link = document.createElement('a');
-      const path = `/export/${exportKind}?${params}`;
-      if (exportKind === 'all' || exportKind === 'annotated') {
-        link.href = '/api' + path;
-        link.download = `nllint-${exportKind}.jsonl`;
-        link.click();
-        return;
-      }
-      const response = await api.request(path);
-      link.href = URL.createObjectURL(await response.blob());
-      link.download = `nllint-${exportKind}.jsonl`;
-      link.click();
-      window.setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-    } catch (error) {
-      setError((error as Error).message);
-    }
-  }
-
   const traces = data?.traces ?? [];
   const visibleTrace = traces.find(trace => trace.id === selectedTrace);
   useEffect(() => {
@@ -348,12 +325,12 @@ function Workspace({api, logout, section, project, traceId, models}: {
   const pageSelection = traces.flatMap(trace => trace.matching_run_ids
     .filter(id => trace.cells.some(cell => cell.run_id === id)).map(run_id => ({trace_id: trace.id, run_id})));
   const matchingRuns = [...new Set(pageSelection.map(item => item.run_id))];
-  const selectionKey = (item: Selection) => `${item.trace_id}:${item.run_id}`;
+  const selectionKey = (item: TraceSelection) => `${item.trace_id}:${item.run_id}`;
   const selected = new Set(selection.map(selectionKey));
-  function selectItems(items: Selection[]) {
+  function selectItems(items: TraceSelection[]) {
     setSelection(current => [...new Map([...current, ...items].map(item => [selectionKey(item), item])).values()].slice(0, 250));
   }
-  function toggleItem(item: Selection) {
+  function toggleItem(item: TraceSelection) {
     if (selected.has(selectionKey(item))) {
       setSelection(current => current.filter(entry => selectionKey(entry) !== selectionKey(item)));
     } else selectItems([item]);
@@ -423,24 +400,11 @@ function Workspace({api, logout, section, project, traceId, models}: {
           {traceId && <Link to={gatewayQuery(tracePath(project), {...query, ...closedReview, page: null})}>← Project traces</Link>}
           <TraceFilters api={api} query={query} setQuery={setQuery} project={project}
             projects={projects} keys={keys} labelers={labelers} ruleScope={ruleScope.toString()}/>
-          <DatasetActions api={api} selection={selection} labelers={labelers} onError={setError}
-            matchingOnPage={pageSelection.length} onSelectPage={() => selectItems(pageSelection)} onClear={() => setSelection([])}
-            scopeDownload={<div className="export" role="group" aria-label="Project and rule JSONL options">
-              <label htmlFor="dataset">Records
-              <select id="dataset" value={exportKind} onChange={event => {
-                const value = exportKinds.find(kind => kind === event.target.value);
-                if (value) void setQuery({exportKind: value});
-              }}>
-                <option value="files">File decisions</option>
-                <option value="ranges">Range examples</option>
-                <option value="adjudication">Range annotations</option>
-                <option value="annotated">Annotated runs</option>
-                <option value="all">All runs</option>
-              </select></label>
-              <label><input type="checkbox" checked={Boolean(query.includeAgentic)}
-                onChange={event => void setQuery({includeAgentic: Number(event.target.checked)})}/>Include agent results</label>
-              <button type="button" onClick={download}>Download .jsonl</button>
-            </div>}/>
+          <div className="trace-data-actions">
+            <TraceExport api={api} scope={scope} selection={selection} labelers={labelers} onError={setError}/>
+            <SelectionActions api={api} selection={selection} labelers={labelers} onError={setError}
+              matchingOnPage={pageSelection.length} onSelectPage={() => selectItems(pageSelection)} onClear={() => setSelection([])}/>
+          </div>
           <div className="matrix-bar">
             <TableStages selected={stages} onChange={stages => void setQuery({stages})}/>
             <div className="trace-table-actions">

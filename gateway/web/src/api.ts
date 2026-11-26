@@ -19,6 +19,7 @@ export function attribution(identity: Identity | null, showChannel = false) {
 }
 export type Label = boolean | null;
 export type Mode = 'files' | 'adjudication' | 'ranges';
+export type TraceSelection = {trace_id: string; run_id: number};
 export type ReviewMode = 'files' | 'ranges';
 export type Range = {
   start: number;

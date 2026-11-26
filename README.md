@@ -66,7 +66,7 @@ Open **Traces** to review recorded lint requests. Each row is a file snapshot, a
 - Open **File decisions** to mark whether the file violates the rule. If the pipeline missed a violation, **Find and annotate ranges** starts range processing immediately. Otherwise it starts after the configured delay.
 - Open **Ranges** to review a span in the file. Use **Add range** and drag in the gutter to annotate lines the pipeline missed. The CLI and VS Code pick up annotations on their next sync.
 - Run an **Agent labeler** for a second opinion. Compare its saved result with the pipeline or an annotation. Save a file or range annotation to apply a correction to diagnostics.
-- Use **Export trace data** to download by project, API key, rule, or trace. In **Selected runs**, add matching cells across pages and download those records, or save an evaluation set with fixed expected answers. To compare rule revisions, rerun lint on the same files and open **Evaluation sets**.
+- Use **Export JSONL** to download records for the current project, API key, rule, or trace, or for the runs you selected. Open **Build eval set** to add page matches and save an evaluation set with fixed expected answers. To compare rule revisions, rerun lint on the same files and open **Evaluation sets**.
 
 Use **Projects** to configure the models that process future lint requests or to include rule history from another project. See the [REST and MCP guide](docs/api.md) for integrations and the [gateway design](docs/gateway.md) for pipeline and cache behavior.
 
