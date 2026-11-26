@@ -36,6 +36,7 @@ pre { margin: .5rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .brand { display: inline-flex; align-items: center; gap: .7rem; font-weight: 750; text-decoration: none; color: var(--ink); white-space: nowrap; }
 .brand-icon { display: block; width: 2.1rem; height: 2.1rem; object-fit: contain; }
 .workspace { max-width: 1800px; padding: clamp(1rem, 3vw, 3rem); margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.25rem; }
+.trace-workspace { max-width: none; padding: 1rem clamp(1rem, 2vw, 2rem); }
 .with-review { grid-template-columns: minmax(0, 1fr) minmax(340px, 39%); }
 .workspace-main { min-width: 0; }
 .page-heading, .matrix-bar, .source-tools, .panel-heading { display: flex; justify-content: space-between; align-items: center; gap: .8rem; flex-wrap: wrap; }
@@ -52,17 +53,17 @@ pre { margin: .5rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .filters > label { min-width: 9rem; flex: 1; }
 .filters select, .filters input { width: 100%; min-width: 0; }
 .matrix-bar { margin: .75rem 0; }
-.table-scroll { overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: white; max-height: 70vh; }
+.trace-table { position: relative; overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: white; }
 table { width: 100%; border-collapse: separate; border-spacing: 0; }
 th, td { vertical-align: top; text-align: left; padding: .85rem 1rem; border-bottom: 1px solid var(--line); }
 tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
 thead th { background: #e9f0ec; position: sticky; top: 0; z-index: 2; text-wrap: nowrap; }
-.table-scroll td, .table-scroll th { min-width: 13rem; }
-.table-scroll th:first-child { position: sticky; left: 0; background: #f2f6f3; z-index: 1; }
-.table-scroll thead th:first-child { background: #e9f0ec; z-index: 3; }
-.table-scroll td { border-left: 1px solid var(--line); }
-.table-scroll td > * { margin-bottom: .4rem; }
-.table-scroll small { display: block; font-weight: 450; overflow-wrap: anywhere; }
+.trace-table td, .trace-table th { min-width: 13rem; }
+.trace-table th:first-child { position: sticky; left: 0; background: #f2f6f3; z-index: 1; }
+.trace-table thead th:first-child { background: #e9f0ec; z-index: 3; }
+.trace-table td { border-left: 1px solid var(--line); }
+.trace-table td > * { margin-bottom: .4rem; }
+.trace-table small { display: block; font-weight: 450; overflow-wrap: anywhere; }
 .file-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .45rem; margin-block: .3rem; }
 .file-name { display: block; color: var(--ink); overflow-wrap: anywhere; }
 .column-rule, .text-button { border: 0; color: var(--brand); padding: .08rem .18rem; text-align: left; background: transparent; }
@@ -74,13 +75,16 @@ thead th { background: #e9f0ec; position: sticky; top: 0; z-index: 2; text-wrap:
 .clear { background: #e2f2e6; color: #215f3d; }
 .neutral { background: #eef0f7; color: #414e70; }
 .label-buttons button { padding: .24rem .42rem; font-size: .8rem; }
-.pagination { margin: .9rem 0; display: flex; gap: .9rem; align-items: center; justify-content: end; }
+.trace-table-actions, .pagination { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; }
 .empty { padding: 1.45rem; color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; margin: .6rem 0; display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
 .review-panel { align-self: start; min-width: 0; padding: 1.15rem; background: white; border: 1px solid var(--line); border-radius: 10px; }
 .review-panel > * { margin-bottom: .8rem; }
 .panel-heading { align-items: flex-start; }
 .panel-heading small { overflow-wrap: anywhere; }
 .close { font-size: 1.2rem; line-height: 1.1; padding: .3rem .5rem; }
+@media (min-width: 901px) {
+  .review-panel { position: sticky; top: 1rem; max-height: calc(100dvh - 2rem); overflow: auto; }
+}
 .rule-card, .adjudication details { border: 1px solid var(--line); border-radius: 6px; padding: .55rem .7rem; }
 details summary { cursor: pointer; overflow-wrap: anywhere; }
 details pre { max-height: 19rem; overflow: auto; }

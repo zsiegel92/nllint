@@ -80,7 +80,7 @@ export function Matrix({traces, stages, open, openFile, onRule, languages, trace
   const columns = [...new Map(traces.flatMap(trace => trace.cells.map(cell =>
     [cell.rule_version, {...cell, project: trace.project}] as const))).values()]
     .sort((left, right) => left.rule_id.localeCompare(right.rule_id) || left.rule_path.localeCompare(right.rule_path));
-  return <div className="table-scroll"><table>
+  return <div className="trace-table" role="region" aria-label="Lint results" tabIndex={0}><table>
     <thead><tr><th scope="col">File</th>{columns.map(column =>
       <th scope="col" key={column.rule_version}>
         <button type="button" className="column-rule" aria-pressed={selectedRules.includes(column.rule_version)}

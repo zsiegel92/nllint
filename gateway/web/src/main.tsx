@@ -412,7 +412,7 @@ function Workspace({api, logout, section, project, traceId, models}: {
       </nav>
       <button className="quiet" type="button" onClick={logout}>Sign out</button>
     </header>
-    <main className={active && section === 'traces' ? 'workspace with-review' : 'workspace'}>
+    <main className={section === 'traces' ? `workspace trace-workspace${active ? ' with-review' : ''}` : 'workspace'}>
       <section className="workspace-main">
         {error && <p role="alert" className="error">{error} <button type="button" onClick={() => setError('')}>Dismiss</button></p>}
         {section === 'traces' && <>
@@ -443,7 +443,14 @@ function Workspace({api, logout, section, project, traceId, models}: {
             </div>}/>
           <div className="matrix-bar">
             <TableStages selected={stages} onChange={stages => void setQuery({stages})}/>
-            <button className="quiet" type="button" onClick={refresh}>Refresh</button>
+            <div className="trace-table-actions">
+              <button className="quiet" type="button" onClick={refresh}>Refresh</button>
+              {!traceId && <nav className="pagination" aria-label="Trace pages">
+                <button type="button" disabled={!page} onClick={() => void setQuery({page: page - 1})}>← Previous</button>
+                <span>Page {page + 1}</span>
+                <button type="button" disabled={!data?.more} onClick={() => void setQuery({page: page + 1})}>Next →</button>
+              </nav>}
+            </div>
           </div>
           <div className="matrix-bar agent-controls">
             {selectedLabeler ? <>
@@ -471,11 +478,6 @@ function Workspace({api, logout, section, project, traceId, models}: {
               rules: rules.includes(version) ? rules.filter(id => id !== version) : [...rules, version], rule: null, page: null,
             })}/>
             : <p role="status">Loading traces…</p>}
-          {!traceId && data && <div className="pagination">
-            <button type="button" disabled={!page} onClick={() => void setQuery({page: page - 1})}>← Previous</button>
-            <span>Page {page + 1}</span>
-            <button type="button" disabled={!data.more} onClick={() => void setQuery({page: page + 1})}>Next →</button>
-          </div>}
         </>}
         {section === 'evals' && <EvalSets api={api} onError={setError}/>}
         {section === 'labelers' && <LabelerSettings api={api} items={labelers} refresh={refresh} onError={setError}/>}
