@@ -653,22 +653,34 @@ def review_cell(row, labels):
     }
 
 
-def annotation_identity(request, body, target):
+def annotation_kind(request, body):
+    if body.labeler_type:
+        return body.labeler_type
+    if body.labeler_identity:
+        return body.labeler_identity.type
+    return "HUMAN" if getattr(request.state, "web_session", False) else "BOT"
+
+
+def protect_annotation(raw):
+    identity = decode_identity(raw)
+    if identity is None or identity["type"] == "HUMAN":
+        raise HTTPException(
+            409, "A bot cannot replace or clear a human or legacy annotation"
+        )
+
+
+def annotation_identity(request, body, target, kind):
+    identity = body.labeler_identity
+    user_id = request.state.user_id
+    if kind == "HUMAN" and identity and identity.user_id not in (None, user_id):
+        raise HTTPException(422, "The human labeler must be the authenticated user")
     if body.decision is None:
         return None
-    identity = body.labeler_identity
-    web = getattr(request.state, "web_session", False)
-    kind = body.labeler_type or (
-        identity.type if identity else "HUMAN" if web else "BOT"
-    )
     data = identity.model_dump(exclude_none=True) if identity else {"type": kind}
     data["origin"] = getattr(request.state, "annotation_origin", "api")
     if kind == "HUMAN":
-        user_id = request.state.user_id
-        if identity and identity.user_id not in (None, user_id):
-            raise HTTPException(422, "The human labeler must be the authenticated user")
         data["user_id"] = user_id
-        if web:
+        if getattr(request.state, "web_session", False):
             data["origin"] = "webapp"
             data["signature"] = sign(
                 json.dumps([user_id, target, body.decision]),
@@ -681,9 +693,25 @@ def annotation_identity(request, body, target):
 @router.put("/pairs/{pair_id}/file")
 async def annotate_file(pair_id: int, body: FileAnnotation, request: Request):
     settings = request.app.state.settings
-    labeler = annotation_identity(request, body, ["file", pair_id])
+    kind = annotation_kind(request, body)
+    labeler = annotation_identity(request, body, ["file", pair_id], kind)
     async with request_db(request) as conn:
         pair = await lock_pair(conn, pair_id)
+        if kind == "BOT":
+            if pair["file_label"] is not None:
+                protect_annotation(pair["labeler_identity"])
+            if body.decision is False and await conn.fetchval(
+                """
+                SELECT EXISTS (SELECT 1 FROM range_annotations
+                    WHERE pair_id=$1 AND decision
+                    AND labeler_identity->>'type' IS DISTINCT FROM 'BOT')
+            """,
+                pair_id,
+            ):
+                raise HTTPException(
+                    409,
+                    "A negative bot file label would suppress an accepted human or legacy range",
+                )
         if body.reject_all and body.decision is not False:
             raise HTTPException(
                 400, "Rejecting all ranges requires a negative file label"
@@ -738,14 +766,21 @@ async def annotate_file(pair_id: int, body: FileAnnotation, request: Request):
         if body.reject_all:
             candidates = await conn.fetch(
                 """
-                SELECT c.start_line,c.end_line
-                FROM runs r JOIN range_candidates c ON c.run_id=r.id WHERE r.pair_id=$1
+                SELECT c.start_line,c.end_line,a.labeler_identity,a.decision
+                FROM runs r JOIN range_candidates c ON c.run_id=r.id
+                LEFT JOIN range_annotations a
+                  ON (a.pair_id,a.start_line,a.end_line)=(r.pair_id,c.start_line,c.end_line)
+                WHERE r.pair_id=$1
                 AND (r.id=$2::bigint OR ($2::bigint IS NULL AND r.version=$3))
             """,
                 pair_id,
                 body.run_id,
                 version,
             )
+            if kind == "BOT":
+                for candidate in candidates:
+                    if candidate["decision"] is not None:
+                        protect_annotation(candidate["labeler_identity"])
             await conn.executemany(
                 """
                 INSERT INTO range_annotations(pair_id,start_line,end_line,decision,labeler_identity)
@@ -762,6 +797,7 @@ async def annotate_file(pair_id: int, body: FileAnnotation, request: Request):
                             request,
                             body,
                             ["range", pair_id, row["start_line"], row["end_line"]],
+                            kind,
                         ),
                     )
                     for row in candidates
@@ -836,8 +872,9 @@ async def retry_run(conn, run_id):
 
 @router.put("/pairs/{pair_id}/range")
 async def annotate_range(pair_id: int, body: RangeAnnotation, request: Request):
+    kind = annotation_kind(request, body)
     labeler = annotation_identity(
-        request, body, ["range", pair_id, body.start, body.end]
+        request, body, ["range", pair_id, body.start, body.end], kind
     )
     async with request_db(request) as conn:
         pair = await lock_pair(conn, pair_id)
@@ -848,6 +885,18 @@ async def annotate_range(pair_id: int, body: RangeAnnotation, request: Request):
         )
         if body.end > len(source_lines(source)):
             raise HTTPException(422, "Range is outside the file")
+        if kind == "BOT":
+            existing = await conn.fetchrow(
+                """
+                SELECT labeler_identity FROM range_annotations
+                WHERE (pair_id,start_line,end_line)=($1,$2,$3)
+            """,
+                pair_id,
+                body.start,
+                body.end,
+            )
+            if existing is not None:
+                protect_annotation(existing["labeler_identity"])
         if body.decision is None:
             result = await conn.execute(
                 """

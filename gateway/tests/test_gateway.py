@@ -506,6 +506,63 @@ class GatewayTest(unittest.TestCase):
             run = self.json(client.get(f"/v1/runs/{first['run_id']}", headers=key))
             self.assertEqual(run["labeler_identity"], {"type": "BOT", "origin": "api"})
 
+            for decision in (False, None):
+                self.assertEqual(
+                    client.put(
+                        f"/v1/pairs/{second['pair_id']}/file",
+                        headers=key,
+                        json={"decision": decision},
+                    ).status_code,
+                    409,
+                )
+                self.assertEqual(
+                    client.put(
+                        f"/v1/pairs/{first['pair_id']}/range",
+                        headers=key,
+                        json={"start": 2, "end": 3, "decision": decision},
+                    ).status_code,
+                    409,
+                )
+            file_path = f"/v1/pairs/{first['pair_id']}/file"
+            # A negative file label would suppress the positive IDE annotation.
+            self.assertEqual(
+                client.put(
+                    file_path, headers=key, json={"decision": False}
+                ).status_code,
+                409,
+            )
+            self.json(
+                client.put(editor_path, headers=key, json={**editor, "decision": False})
+            )
+            # Bulk rejection must also preserve attribution on an already rejected range.
+            response = client.put(
+                file_path,
+                headers=key,
+                json={
+                    "decision": False,
+                    "run_id": first["run_id"],
+                    "reject_all": True,
+                },
+            )
+            self.assertEqual(response.status_code, 409)
+            run = self.json(client.get(f"/v1/runs/{first['run_id']}", headers=key))
+            self.assertTrue(run["file_label"])
+            self.assertEqual(
+                next(
+                    region["labeler_identity"]["origin"]
+                    for region in run["ranges"]
+                    if region["start"] == 2
+                ),
+                "ide",
+            )
+            self.json(
+                client.put(
+                    f"/v1/pairs/{first['pair_id']}/range",
+                    headers=key,
+                    json={"start": 1, "end": 1, "decision": None},
+                )
+            )
+
             project_id = trace["project_id"]
             self.assertEqual(registered["id"], project_id)
             path = f"/api/projects/{project_id}/routing"
