@@ -5,6 +5,7 @@ import {Eye, Pencil} from 'lucide-react';
 import {Link} from 'react-router';
 import {CodeBlock, highlightLines, languageForPath} from './code';
 import type {Language} from './code';
+import {Disclosure} from './disclosure';
 import {findRangesPath, rangeParam} from './navigation';
 import {ReviewStages} from './stage-selector';
 import {AnnotationVerdict, LabelButtons, RangeLink, rangeStatus, SourceReview} from './source-review';
@@ -134,14 +135,14 @@ function ProviderRequestList({history}: {history: ProviderHistory}) {
       <small> {history.settings[kind].base_url}</small>
     </div>)}
     {history.requests.length === 0 && <p className="muted">No provider requests recorded for this run.</p>}
-    {history.requests.map(item => <details key={item.id}>
-      <summary>{({file: 'File decision', ranges: 'Range suggestions', adjudication: 'Range checks'})[item.stage]}
+    {history.requests.map(item => <Disclosure key={item.id}
+      label={<>{({file: 'File decision', ranges: 'Range suggestions', adjudication: 'Range checks'})[item.stage]}
         {' · '}{item.reused ? 'Reused request' : (item.http_status ?? item.transport_error ?? 'Outcome pending')}
-        {' · '}{new Date(item.started_at).toLocaleString()}</summary>
+        {' · '}{new Date(item.started_at).toLocaleString()}</>}>
       {item.resolved_model && <div>Served by {item.resolved_model}{item.resolved_service_tier && ` · ${item.resolved_service_tier}`}</div>}
       {item.question_count !== null && <div>Questions sent {item.question_count}</div>}
       {item.usage && <CodeBlock source={JSON.stringify(item.usage, null, 2)} language="json"/>}
-    </details>)}
+    </Disclosure>)}
   </section>;
 }
 
@@ -189,10 +190,10 @@ function RuleDetails({api, trace, cell, tab, refresh}: {api: Api; trace: Trace; 
       onClick={() => api.json(`/runs/${cell.run_id}/retry`, 'POST').then(refresh).catch(error => setError(error.message))}>Retry</button></div>}
     {tab === 'definition' && (run ? <CodeBlock source={run.rule} language="markdown"/> : <p role="status">Loading rule…</p>)}
     {tab === 'history' && (otherVersions ? (otherVersions.length > 0
-      ? otherVersions.map(item => <details key={`${item.project}-${item.rule_hash}`}>
-        <summary>{item.project} · {new Date(item.first_seen).toLocaleDateString()} · {item.rule_hash.slice(0, 8)}</summary>
+      ? otherVersions.map(item => <Disclosure key={`${item.project}-${item.rule_hash}`}
+        label={`${item.project} · ${new Date(item.first_seen).toLocaleDateString()} · ${item.rule_hash.slice(0, 8)}`}>
         <CodeBlock source={item.rule} language="markdown"/>
-      </details>) : <p className="muted">Only the current version is recorded.</p>)
+      </Disclosure>) : <p className="muted">Only the current version is recorded.</p>)
       : <p role="status">Loading rule history…</p>)}
     {tab === 'annotations' && (events ? <section>
       {events.events.length ? <ul>{events.events.map(event => <li key={event.id}>

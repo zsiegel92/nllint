@@ -1,7 +1,9 @@
 import {useQueryStates} from 'nuqs';
+import {useEffect, useState} from 'react';
 import {useNavigate} from 'react-router';
 import {annotationSources} from './api';
 import type {Api, Key, Labeler, Project} from './api';
+import {Disclosure} from './disclosure';
 import {closedReview, gatewayQuery, issueLabels, navigation, tracePath} from './navigation';
 import {RulePicker} from './rule-picker';
 
@@ -34,6 +36,12 @@ export function TraceFilters({api, query, setQuery, project, projects, keys, lab
 }) {
   const navigate = useNavigate();
   const {issue, sort, key, rule, rules} = query;
+  const hasAdvancedFilters = Boolean(query.pathContains || query.sourceContains || query.extraIssue ||
+    query.filterAgent || query.peerAgent || query.reviewerOrigin || query.minConfidence || query.maxConfidence);
+  const [advancedOpen, setAdvancedOpen] = useState(hasAdvancedFilters);
+  useEffect(() => {
+    if (hasAdvancedFilters) setAdvancedOpen(true);
+  }, [hasAdvancedFilters]);
   const activeIssues = new Set([issue, query.extraIssue]);
   const comparePeers = activeIssues.has('agent-agent-disagreements') || sort === 'disagreement';
   const compareAgent = comparePeers || ['agent-disagreements', 'agent-review-disagreements', 'agent-unlabeled'].some(filter => activeIssues.has(filter));
@@ -63,8 +71,7 @@ export function TraceFilters({api, query, setQuery, project, projects, keys, lab
         onChange={rules => void setQuery({rules, rule: null, page: null})}/>
       {rule && <button type="button" onClick={() => void setQuery({rule: null, page: null})}>Clear rule path filter</button>}
     </div>
-    <details className="disclosure" open={Boolean(query.pathContains || query.sourceContains || query.extraIssue || query.filterAgent || query.peerAgent || query.reviewerOrigin || query.minConfidence || query.maxConfidence) || undefined}>
-      <summary>Advanced filters</summary>
+    <Disclosure label="Advanced filters" open={advancedOpen} onOpenChange={setAdvancedOpen}>
       <div className="filters">
         <label>File path contains<input maxLength={500} value={query.pathContains} onChange={event => void setQuery({pathContains: event.target.value, page: null}, {history: 'replace'})}/></label>
         <label>Source text contains<input maxLength={500} value={query.sourceContains} onChange={event => void setQuery({sourceContains: event.target.value, page: null}, {history: 'replace'})}/></label>
@@ -90,6 +97,6 @@ export function TraceFilters({api, query, setQuery, project, projects, keys, lab
           <option value="all">Match both</option><option value="any">Match either</option>
         </select></label>}
       </div>
-    </details>
+    </Disclosure>
   </>;
 }

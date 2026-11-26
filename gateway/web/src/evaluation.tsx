@@ -1,6 +1,7 @@
 import {useEffect, useState} from 'react';
 import type {FormEvent} from 'react';
 import type {Api, Labeler, TraceSelection} from './api';
+import {Disclosure} from './disclosure';
 import {Link} from 'react-router';
 import {gatewayQuery, tracePath} from './navigation';
 import {RulePicker} from './rule-picker';
@@ -43,8 +44,8 @@ export function SelectionActions({api, selection, labelers, onError, matchingOnP
       setBusy(false);
     }
   }
-  return <details className="disclosure">
-    <summary>Build eval set{selection.length > 0 && ` (${selection.length} selected)`}</summary>
+  const title = selection.length ? `Build eval set (${selection.length} selected)` : 'Build eval set';
+  return <Disclosure label={title}>
     <div className="selection-controls">
       <p>Select individual rule results in the table or add this page’s matches. Selections carry across pages until you reload.</p>
       <div className="selection-button-group" role="group" aria-label="Manage selected runs">
@@ -66,7 +67,7 @@ export function SelectionActions({api, selection, labelers, onError, matchingOnP
       </form>
       {status && <p role="status">{status} · <Link to="/eval-sets">View evaluation sets</Link></p>}
     </section>}
-  </details>;
+  </Disclosure>;
 }
 
 const fileLabels: Record<string, string> = {

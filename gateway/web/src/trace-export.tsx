@@ -3,6 +3,7 @@ import type {FormEvent} from 'react';
 import {useQueryStates} from 'nuqs';
 import {annotationSources} from './api';
 import type {Api, Labeler, TraceSelection} from './api';
+import {Disclosure} from './disclosure';
 import {exportKinds, navigation} from './navigation';
 
 const recordLabels = {
@@ -64,8 +65,7 @@ export function TraceExport({api, scope, selection, labelers, onError}: {
     }
   }
 
-  return <details className="disclosure">
-    <summary>Export JSONL</summary>
+  return <Disclosure label="Export JSONL">
     <form className="trace-export-form" onSubmit={download}>
       <div className="trace-export-fields">
         <label>Export from<select value={selected ? 'selected' : 'scope'} onChange={event =>
@@ -106,5 +106,5 @@ export function TraceExport({api, scope, selection, labelers, onError}: {
         {busy ? 'Preparing download…' : 'Download JSONL'}
       </button>
     </form>
-  </details>;
+  </Disclosure>;
 }
