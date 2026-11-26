@@ -39,7 +39,7 @@ type Hover = {marker: Marker; line: number; above: boolean};
 
 function layout(cells: Cell[], lineCount: number) {
   const markers = cells.flatMap((cell, index) => [...cell.ranges, ...agentRanges(cell)].map(range => ({
-    cell, range, color: range.agent ? '#8554b3' : `hsl(${(index * 137.508 + 217) % 360} 61% 42%)`,
+    cell, range, color: range.agent ? 'var(--agent)' : `hsl(${(index * 137.508 + 217) % 360} 61% 42%)`,
     key: `${cell.run_id}:${rangeParam(range)}`, lane: 0,
   }))).sort((a, b) => a.range.start - b.range.start || a.range.end - b.range.end || a.cell.run_id - b.cell.run_id);
   const ends: number[] = [];
