@@ -1,4 +1,6 @@
-import {useMemo} from 'react';
+import {useMemo, useRef, useState} from 'react';
+import type {ReactNode} from 'react';
+import {Pencil} from 'lucide-react';
 import {createLowlight} from 'lowlight';
 import bash from 'highlight.js/lib/languages/bash';
 import css from 'highlight.js/lib/languages/css';
@@ -39,17 +41,34 @@ export function languageForPath(path: string): Language {
   return extension && Object.hasOwn(extensions, extension) ? extensions[extension] : 'markdown';
 }
 
-export function SyntaxPicker({language, onChange}: {
-  language: Language; onChange: (language: Language) => void;
+export function SourceHeader({filename, language, onLanguage, children}: {
+  filename: string; language: Language; onLanguage: (language: Language) => void; children?: ReactNode;
 }) {
-  return <label className="syntax-picker">Syntax
-    <select value={language} onChange={event => {
-      const selected = event.target.value;
-      if (isLanguage(selected)) onChange(selected);
-    }}>
-      {Object.entries(labels).map(([value, title]) => <option key={value} value={value}>{title}</option>)}
-    </select>
-  </label>;
+  const [editing, setEditing] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  function closeEditor() {
+    setEditing(false);
+    requestAnimationFrame(() => trigger.current?.focus());
+  }
+  return <div className="source-tools">
+    <h3>{filename}</h3>
+    <div className="source-header-actions">
+      {children}
+      {editing ? <select autoFocus aria-label="Syntax language" value={language} onBlur={() => setEditing(false)}
+        onKeyDown={event => {
+          if (event.key === 'Escape') {event.stopPropagation(); closeEditor();}
+        }}
+        onChange={event => {
+          if (isLanguage(event.target.value)) onLanguage(event.target.value);
+          closeEditor();
+        }}>
+        {Object.entries(labels).map(([value, title]) => <option key={value} value={value}>{title}</option>)}
+      </select> : <button ref={trigger} type="button" className="syntax-edit"
+        aria-label={`Change syntax language, currently ${labels[language]}`} onClick={() => setEditing(true)}>
+        {labels[language]} <Pencil size={13} aria-hidden="true"/>
+      </button>}
+    </div>
+  </div>;
 }
 
 export function isLanguage(value: string): value is Language {

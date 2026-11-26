@@ -1,4 +1,4 @@
-import {createSerializer, parseAsBoolean, parseAsInteger, parseAsString, parseAsStringLiteral} from 'nuqs';
+import {createSerializer, parseAsArrayOf, parseAsInteger, parseAsString, parseAsStringLiteral} from 'nuqs';
 
 export const sectionPaths = {traces: '/traces', projects: '/pipelines', keys: '/api-keys'} as const;
 export type Section = keyof typeof sectionPaths;
@@ -22,7 +22,8 @@ export function tracePath(project?: string, traceId?: string) {
 
 export const modelsPath = (projectId: number | string) => `/pipelines/${projectId}/models`;
 export const findRangesPath = (runId: number | string) => `/find-ranges/${runId}`;
-export const modes = ['files', 'adjudication', 'ranges'] as const;
+export const modes = ['files', 'ranges', 'adjudication'] as const;
+export const reviewModes = ['files', 'ranges'] as const;
 export const issueLabels = {
   all: 'All traces',
   'file-range-positives': 'File- and Range-level positives',
@@ -36,27 +37,25 @@ export const issueLabels = {
 };
 
 export const navigation = {
-  mode: parseAsStringLiteral(modes).withDefault('adjudication'),
+  mode: parseAsStringLiteral(reviewModes).withDefault('files'),
+  stages: parseAsArrayOf(parseAsStringLiteral(modes)).withDefault([...modes]),
   issue: parseAsStringLiteral(Object.keys(issueLabels)).withDefault('all'),
   key: parseAsString.withDefault(''),
   rule: parseAsString.withDefault(''),
+  rules: parseAsArrayOf(parseAsString).withDefault([]),
+  sort: parseAsStringLiteral(['relevance', 'newest']).withDefault('relevance'),
   page: parseAsInteger.withDefault(0),
   exportKind: parseAsStringLiteral(modes).withDefault('adjudication'),
   run: parseAsInteger,
   reviewTrace: parseAsString,
-  review: parseAsStringLiteral(modes),
   range: parseAsString,
-  context: parseAsBoolean.withDefault(false),
   syntax: parseAsString,
-  ruleHistory: parseAsBoolean.withDefault(false),
-  providerRequests: parseAsBoolean.withDefault(false),
 };
 
 export const gatewayQuery = createSerializer(navigation);
 
 export const closedReview = {
-  run: null, reviewTrace: null, review: null, range: null, context: null, syntax: null,
-  ruleHistory: null, providerRequests: null,
+  run: null, reviewTrace: null, range: null, syntax: null,
 } as const;
 
 export const rangeParam = (range: {start: number; end: number}) => `${range.start}-${range.end}`;

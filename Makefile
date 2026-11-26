@@ -15,7 +15,7 @@ UVICORN = $(GATEWAY_RUN) uvicorn nllint_gateway.main:app --host $(API_HOST) --po
 VITE = npm --prefix gateway/web run dev -- --host 127.0.0.1 --port $(WEB_PORT) --strictPort
 
 .PHONY: help dev api-dev web-dev serve web-install web-build modal-serve modal-api deploy deploy-api worker
-.PHONY: db-migrate db-check daemon-start daemon-stop cli-build cli-release cli-install cli-run cli-watch ide-package skill-install check test
+.PHONY: db-migrate db-check daemon-start daemon-stop daemon-restart cli-build cli-release cli-install cli-run cli-watch ide-package skill-install check test
 
 help: ## List commands and their configurable arguments
 	@awk 'BEGIN { FS = ":.*## " } /^##@ / { print "\n" substr($$0, 5) } /^[a-z][a-z-]*:.*## / { printf "  %-16s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -76,6 +76,10 @@ daemon-start: ## Build CLI and start the detached local lint gateway
 
 daemon-stop: ## Stop the detached local lint gateway
 	cargo run --locked -q -p nllint -- stop
+
+daemon-restart: ## Restart the detached local lint gateway
+	$(MAKE) --no-print-directory daemon-stop
+	$(MAKE) --no-print-directory daemon-start
 
 cli-build: ## Compile the Rust CLI in debug mode
 	cargo build --locked -p nllint

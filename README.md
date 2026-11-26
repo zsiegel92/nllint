@@ -78,7 +78,7 @@ Run `make help` for the complete command list. The most common configurations ar
 | Vite and a temporary Modal backend | `make modal-api`, then `make web-dev BACKEND_URL=https://…` with its printed URL |
 | Vite and an already deployed backend | `make web-dev BACKEND_URL=https://…` |
 | Deploy to Modal | `make deploy` or `make deploy-api` |
-| Local detached gateway | `make daemon-start` and `make daemon-stop` |
+| Local detached gateway | `make daemon-start`, `make daemon-stop`, and `make daemon-restart` |
 
 Vite defaults to [localhost:5175](http://localhost:5175) and FastAPI defaults to port 8080. Use `ENV_FILE`, `API_PORT`, and `WEB_PORT` to override those settings. If you change the local backend port, update `NLLINT_APP_URL` and the GitHub callback to match. For Vite against a hosted gateway, set `NLLINT_REMOTE_DEV_ORIGIN=http://localhost:5175` on the gateway to enable sign-in from that origin. Keep the GitHub callback registered at the gateway's HTTPS URL.
 

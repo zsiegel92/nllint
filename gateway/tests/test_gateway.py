@@ -105,6 +105,7 @@ class GatewayTest(unittest.TestCase):
             registered = self.json(
                 client.post("/api/projects", headers=UI, json={"name": "demo"}), 201
             )
+            self.assertEqual(registered["requests"], 0)
             data = {
                 "project": "demo",
                 "path": "a.py",
@@ -120,11 +121,27 @@ class GatewayTest(unittest.TestCase):
             }
             trace_id = self.submit(client, key, data)
             ready = self.wait(client, key, trace_id)
+            self.assertEqual(
+                self.json(client.get(f"/api/traces/{trace_id}/source")),
+                {"file_path": data["path"], "source": data["source"]},
+            )
             self.assertEqual(len(calls), 3)
             self.assertEqual(calls[0][:2], ("file-candidates", 2))
             self.assertEqual(self.submit(client, key, data), trace_id)
+            project = self.json(client.get("/api/projects"))[0]
+            self.assertEqual((project["rules"], project["requests"]), (2, 1))
+            key_id = self.json(client.get("/api/keys"))[0]["id"]
+            self.assertEqual(
+                self.json(client.get("/api/projects", params={"key_id": key_id})),
+                [project],
+            )
+            self.assertEqual(
+                self.json(client.get("/api/projects", params={"key_id": -1})), []
+            )
             trace = self.json(client.get("/api/traces"))["traces"][0]
             first, second = trace["cells"]
+            self.assertTrue(first["ranges_checked"])
+            self.assertFalse(second["ranges_checked"])
             self.assertEqual(first["ranges"][0]["preview"], "b\nc")
             self.assertEqual(ready[1]["ranges"], [])
             for issue in ("file-range-positives", "adjudicated-positives"):
@@ -170,6 +187,62 @@ class GatewayTest(unittest.TestCase):
                 [item["id"] for item in history["requests"]],
             )
             self.assertTrue(all(item["reused"] for item in reused["requests"]))
+
+            catalog = self.json(
+                client.get("/api/rules", params={"search": "rules/a.md"})
+            )
+            self.assertEqual(len(catalog), 1)
+            selected_a = catalog[0]
+            self.assertEqual(selected_a["name"], "a")
+            self.assertEqual(selected_a["file_positives"], 2)
+            self.assertEqual(selected_a["range_positives"], 4)
+            self.assertEqual(selected_a["adjudicated_positives"], 2)
+            alternate = {
+                **data,
+                "path": "more.py",
+                "rules": [
+                    data["rules"][0],
+                    {**data["rules"][1], "text": "detect a second marker"},
+                ],
+            }
+            higher = self.submit(client, key, alternate)
+            self.wait(client, key, higher)
+            newer = self.submit(client, key, {**data, "path": "later.py"})
+            self.wait(client, key, newer)
+            filter_params = [("rule_version", selected_a["id"])]
+            ranked = self.json(client.get("/api/traces", params=filter_params))[
+                "traces"
+            ]
+            self.assertEqual((ranked[0]["id"], ranked[0]["score"]), (higher, 16))
+            self.assertEqual(ranked[1]["score"], 8)
+            newest = self.json(
+                client.get("/api/traces", params=[*filter_params, ("sort", "newest")])
+            )
+            self.assertEqual(newest["traces"][0]["id"], newer)
+            versions = self.json(
+                client.get("/api/rules", params={"search": "rules/b.md"})
+            )
+            self.assertEqual(len(versions), 2)
+            self.assertNotEqual(versions[0]["id"], versions[1]["id"])
+            positive_b = next(item for item in versions if item["file_positives"])
+            negative_b = next(item for item in versions if not item["file_positives"])
+            only_b = self.json(
+                client.get("/api/traces", params={"rule_version": positive_b["id"]})
+            )
+            self.assertEqual([item["id"] for item in only_b["traces"]], [higher])
+            any_selected = self.json(
+                client.get(
+                    "/api/traces",
+                    params=[
+                        *filter_params,
+                        ("rule_version", negative_b["id"]),
+                    ],
+                )
+            )
+            self.assertEqual(
+                [item["id"] for item in any_selected["traces"]],
+                [item["id"] for item in ranked],
+            )
 
             self.json(
                 client.put(
@@ -252,6 +325,9 @@ class GatewayTest(unittest.TestCase):
                 client.get(f"/api/runs/{first['run_id']}").status_code, 404
             )
             self.assertEqual(client.get(history_path).status_code, 404)
+            self.assertEqual(
+                client.get(f"/api/traces/{trace_id}/source").status_code, 404
+            )
             self.assertEqual(client.get(path).status_code, 404)
             self.assertEqual(
                 client.get(f"/v1/lint/{trace_id}", headers=other_key).status_code, 404

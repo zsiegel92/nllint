@@ -7,6 +7,7 @@ The Rust client sends one file and the rules with local cache misses. It polls p
 | `POST /v1/lint` | Submit a project-relative file path, UTF-8 source, optional project prompt, and rules with IDs, relative paths, and Markdown text. |
 | `GET /v1/lint/{id}` | Poll the trace. A pending response uses HTTP 202. A terminal response is ready or failed. |
 | `GET /v1/sync?project=…&cursor=…` | Return the processing version and changed file–rule annotation revisions for this API key and project. |
+| `GET /api/rules` | Search stored rule versions and their positive counts as a signed-in operator. |
 | `GET /api/runs/{id}/provider-requests` | Read the run’s settings snapshot and upstream requests as a signed-in operator. |
 | `/docs` | FastAPI request and operator route reference. |
 
@@ -32,6 +33,12 @@ The gateway retains submitted source and rule text in Postgres for review and ex
 The client sends a project ID with each lint request. Set `project_id` in project settings to use a stable name across checkouts. Without it, the CLI combines the project folder name with a short hash of its canonical path. The gateway creates the project on the first lint. Create it in Pipelines first if you want to configure models beforehand.
 
 API keys authenticate clients. A key can submit work for multiple projects, and a project can receive work from multiple keys. Creating a key does not create a project. A rule history parent includes revisions of matching relative rule paths in the child's Rule history. Rule selection and model routing still come from the project's own settings.
+
+## Rule search and trace rank
+
+The gateway stores the Markdown content and hash submitted with each rule. The Rules picker groups versions by project, client rule ID, relative path, and content hash. Two pieces of Markdown at the same path appear as separate versions when their hashes differ. The counts reflect positive file decisions, candidate ranges, and positive adjudications in the selected project and API-key scope.
+
+Selecting versions shows traces with a positive file decision for any selected version. The default relevance sort adds one point per positive file decision, two per candidate range, and three per positive adjudication across all rule results on the trace. Newer traces break ties. Find presets and ordering strategies are defined separately in the gateway.
 
 ## Provider history and usage
 

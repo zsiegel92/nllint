@@ -6,10 +6,13 @@ import {BrowserRouter, Link, matchRoutes, useLocation, useNavigate} from 'react-
 import {NuqsAdapter} from 'nuqs/adapters/react-router/v7';
 import {closedReview, findRangesPath, gatewayQuery, issueLabels, modelsPath, modes, navigation, rangeParam, routes, sectionPaths, tracePath} from './navigation';
 import {Api} from './api';
-import type {Cell, Key, Label, Mode, Project, Provider, ProviderEdit, Range, Routing, Run, Trace} from './api';
+import type {Cell, Key, Label, Mode, Project, Provider, ProviderEdit, Range, ReviewMode, Routing, Run, Trace} from './api';
 import type {Section} from './navigation';
 import {isLanguage, languageForPath} from './code';
 import {Matrix, ReviewPanel} from './review';
+import {RulePicker} from './rule-picker';
+import {TableStages} from './stage-selector';
+import type {Bounds} from './source-review';
 import './style.css';
 
 const pageSize = 20;
@@ -21,6 +24,7 @@ function base64Url(bytes: Uint8Array): string {
 }
 function App() {
   const location = useLocation();
+  const navigate = useNavigate();
   const matched = matchRoutes([...routes], location)?.at(-1);
   const [authenticated, setAuthenticated] = useState<boolean>();
   const api = useMemo(() => new Api(), []);
@@ -49,6 +53,16 @@ function App() {
     }
     checkSession().catch(error => {setLoginError(error.message); setAuthenticated(false);});
   }, [api]);
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const legacyMode = params.get('review');
+    const oldAdjudication = params.get('mode') === 'adjudication';
+    if (legacyMode === null && !oldAdjudication && !params.has('context')) return;
+    if (oldAdjudication || (!params.has('mode') && legacyMode === 'adjudication')) params.set('mode', 'ranges');
+    else if (!params.has('mode') && (legacyMode === 'files' || legacyMode === 'ranges')) params.set('mode', legacyMode);
+    for (const key of ['review', 'context', 'ruleHistory', 'providerRequests']) params.delete(key);
+    void navigate({pathname: location.pathname, search: params.toString(), hash: location.hash}, {replace: true});
+  }, [location.pathname, location.search, location.hash, navigate]);
   if (authenticated === undefined) return <main className="entry"><p role="status">Checking session…</p></main>;
   if (!authenticated) return <Login api={api} initialError={loginError} login={() => setAuthenticated(true)}/>;
   if (!matched) return <main className="entry"><section className="entry-card">
@@ -160,7 +174,7 @@ function FindRanges({api, run}: {api: Api; run: string}) {
       if (result.stage === 'ready') {
         const view = await api.json<{traces: Trace[]}>(`/traces?${new URLSearchParams({trace_id: trace})}`);
         if (!view.traces[0]) throw new Error('Trace not found');
-        if (active) void navigate(gatewayQuery(tracePath(view.traces[0].project, trace), {run: Number(run)}), {replace: true});
+        if (active) void navigate(gatewayQuery(tracePath(view.traces[0].project, trace), {run: Number(run), mode: 'ranges'}), {replace: true});
       }
       else if (result.stage === 'failed') {
         throw new Error(`Range processing failed${result.error ? ` (${result.error})` : ''}.`);
@@ -188,9 +202,9 @@ function Workspace({api, logout, section, project, traceId, models}: {
 }) {
   const navigate = useNavigate();
   const [query, setQuery] = useQueryStates(navigation, {history: 'push'});
-  const {mode, issue, key, rule, exportKind} = query;
+  const {mode, stages, issue, key, rule, rules, sort, exportKind} = query;
   const page = Math.max(0, query.page);
-  const selectedTrace = query.reviewTrace ?? traceId;
+  const selectedTrace = query.reviewTrace ?? (query.run ? traceId : undefined);
   const [keys, setKeys] = useState<Key[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [filteredProjects, setFilteredProjects] = useState<Project[]>([]);
@@ -226,14 +240,20 @@ function Workspace({api, logout, section, project, traceId, models}: {
     if (key) params.set('key_id', key);
     if (project) params.set('project', project);
     if (rule.trim()) params.set('rule', rule.trim());
+    for (const version of rules) params.append('rule_version', version);
     return params;
-  }, [key, project, rule]);
+  }, [key, project, rule, rules]);
+  const ruleScope = new URLSearchParams();
+  if (project) ruleScope.set('project', project);
+  if (key) ruleScope.set('key_id', key);
+  if (traceId) ruleScope.set('trace_id', traceId);
   useEffect(() => {
     if (section !== 'traces') return;
     let mounted = true;
     let timer: number;
     const params = new URLSearchParams(scope);
     params.set('issue', issue);
+    params.set('sort', sort);
     params.set('limit', String(pageSize));
     params.set('offset', String(page * pageSize));
     if (traceId) params.set('trace_id', traceId);
@@ -248,13 +268,13 @@ function Workspace({api, logout, section, project, traceId, models}: {
     }
     fetchData();
     return () => {mounted = false; clearTimeout(timer);};
-  }, [api, issue, page, reload, scope, section, traceId]);
+  }, [api, issue, page, reload, scope, section, sort, traceId]);
 
-  function changeMode(next: Mode) {
-    void setQuery({mode: next, review: null});
+  function changeMode(next: ReviewMode) {
+    void setQuery({mode: next});
   }
 
-  function saveRange(cell: Cell, range: Range, decision: Label) {
+  function saveRange(cell: Cell, range: Bounds, decision: Label) {
     setBusy(true);
     setError('');
     api.range(cell.pair_id, range.start, range.end, decision).then(refresh)
@@ -297,41 +317,25 @@ function Workspace({api, logout, section, project, traceId, models}: {
 
   const traces = data?.traces ?? [];
   const visibleTrace = traces.find(trace => trace.id === selectedTrace);
-  const visibleRun = visibleTrace?.cells.find(cell => cell.run_id === query.run);
   useEffect(() => {
-    if (section !== 'traces' || !query.run || !selectedTrace || visibleRun) return;
+    if (section !== 'traces' || !selectedTrace || (visibleTrace && !rule)) return;
     let active = true;
     api.json<{traces: Trace[]}>(`/traces?${new URLSearchParams({trace_id: selectedTrace})}`)
       .then(result => {if (active) setFallbackTrace(result.traces[0]);})
       .catch(error => {if (active) setError(error.message);});
     return () => {active = false;};
-  }, [api, query.run, reload, section, selectedTrace, visibleRun]);
-  const activeTrace = visibleRun ? visibleTrace : fallbackTrace?.id === selectedTrace ? fallbackTrace : undefined;
-  const current = activeTrace?.cells.find(cell => cell.run_id === query.run);
-  const active = activeTrace && current ? {trace: activeTrace, cell: current} : undefined;
+  }, [api, reload, rule, section, selectedTrace, visibleTrace]);
+
+  const active = visibleTrace && !rule ? visibleTrace : fallbackTrace?.id === selectedTrace ? fallbackTrace : undefined;
+  const current = active?.cells.find(cell => cell.run_id === query.run);
   const language = query.syntax && isLanguage(query.syntax) ? query.syntax : undefined;
-  const open = (trace: Trace, cell: Cell, range?: Range, view?: Mode) => {
-    const sameFile = selectedTrace === trace.id;
+  const open = (trace: Trace, cell: Cell | undefined, view: ReviewMode, range?: Range) => {
     void setQuery({
-      run: cell.run_id, reviewTrace: traceId === trace.id ? null : trace.id,
-      review: view ?? null, range: range ? rangeParam(range) : null,
-      syntax: sameFile ? query.syntax : null, context: sameFile ? query.context : null,
-      ruleHistory: null, providerRequests: null,
+      run: cell?.run_id ?? null, reviewTrace: trace.id,
+      mode: view, range: range ? rangeParam(range) : null,
+      syntax: selectedTrace === trace.id ? query.syntax : null,
     });
   };
-  const reviewOrder = [...new Map(traces.flatMap(trace =>
-    trace.cells.filter(cell => cell.ranges.length).map(cell => [cell.run_id, {trace, cell}] as const)
-  )).values()];
-  const reviewIndex = active ? reviewOrder.findIndex(item => item.cell.run_id === active.cell.run_id) : -1;
-  function adjacent(direction: number) {
-    return reviewIndex < 0 ? undefined : reviewOrder[reviewIndex + direction];
-  }
-  function openAdjacent(direction: number) {
-    const next = adjacent(direction);
-    if (!next) return;
-    const range = direction < 0 ? next.cell.ranges.at(-1) : next.cell.ranges[0];
-    open(next.trace, next.cell, range, 'adjudication');
-  }
   return <>
     <header className="topbar">
       <Link className="brand" to="/traces"><img className="brand-icon" src="/favicon.ico" alt=""/> NLLint Gateway</Link>
@@ -354,9 +358,9 @@ function Workspace({api, logout, section, project, traceId, models}: {
                 const value = modes.find(mode => mode === event.target.value);
                 if (value) void setQuery({exportKind: value});
               }}>
-                <option value="adjudication">Adjudication examples</option>
                 <option value="files">File decisions</option>
                 <option value="ranges">Range examples</option>
+                <option value="adjudication">Adjudication examples</option>
               </select>
               <button type="button" onClick={download}>Export JSONL</button>
             </div>
@@ -366,27 +370,27 @@ function Workspace({api, logout, section, project, traceId, models}: {
             <label>Find<select value={issue} onChange={event => void setQuery({issue: event.target.value, page: null})}>
               {Object.entries(issueLabels).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
             </select></label>
-            <label>Project<select value={project} onChange={event => void navigate(gatewayQuery(tracePath(event.target.value), {...query, ...closedReview, page: null}))}>
+            <label>Project<select value={project} onChange={event => void navigate(gatewayQuery(tracePath(event.target.value), {...query, ...closedReview, rules: null, rule: null, page: null}))}>
               <option value="">All projects</option>{projects.map(item => <option key={item.id} value={item.name}>{item.name}</option>)}
             </select></label>
             <label>API key<select value={key} onChange={event => void setQuery({key: event.target.value, page: null})}>
               <option value="">All keys</option>{keys.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select></label>
-            <label>Rule path<input value={rule} placeholder="All rules" onChange={event => void setQuery({rule: event.target.value, page: null}, {history: 'replace'})}/></label>
+            <RulePicker api={api} scope={ruleScope.toString()} selected={rules}
+              onChange={rules => void setQuery({rules, rule: null, page: null})}/>
+            {rule && <button type="button" onClick={() => void setQuery({rule: null, page: null})}>Clear rule path filter</button>}
           </div>
           <div className="matrix-bar">
-            <div className="segmented">
-              <button type="button" aria-pressed={mode === 'files'} onClick={() => changeMode('files')}>File decisions</button>
-              <button type="button" aria-pressed={mode === 'adjudication'} onClick={() => changeMode('adjudication')}>Adjudication</button>
-              <button type="button" aria-pressed={mode === 'ranges'} onClick={() => changeMode('ranges')}>Ranges</button>
-            </div>
+            <TableStages selected={stages} onChange={stages => void setQuery({stages})}/>
             <button className="quiet" type="button" onClick={refresh}>Refresh</button>
           </div>
-          {data ? <Matrix traces={traces} mode={mode} open={open}
+          {data ? <Matrix traces={traces} stages={stages} open={open}
             languages={selectedTrace && language ? {[selectedTrace]: language} : {}}
-            openFile={(trace, cell) => open(trace, cell, undefined, 'files')}
+            openFile={trace => open(trace, undefined, 'files')}
             traceLink={trace => gatewayQuery(tracePath(trace.project, trace.id), {...query, ...closedReview, page: null})}
-            save={saveFile} saveRange={saveRange} busy={busy} onRule={path => void setQuery({rule: path, page: null})}/>
+            selectedRules={rules} onRule={version => void setQuery({
+              rules: rules.includes(version) ? rules.filter(id => id !== version) : [...rules, version], rule: null, page: null,
+            })}/>
             : <p role="status">Loading traces…</p>}
           {!traceId && data && <div className="pagination">
             <button type="button" disabled={!page} onClick={() => void setQuery({page: page - 1})}>← Previous</button>
@@ -408,10 +412,11 @@ function Workspace({api, logout, section, project, traceId, models}: {
             <option value="">All keys</option>{keys.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select></label></div>
           {(key ? filteredProjects : projects).length ? <table className="settings-table">
-          <thead><tr><th>Project</th><th>Rules</th><th>Inherits rule history from</th><th>Models</th></tr></thead>
+          <thead><tr><th>Project</th><th>Rules</th><th title="Unique lint requests recorded as traces">Requests</th><th>Inherits rule history from</th><th>Models</th></tr></thead>
           <tbody>{(key ? filteredProjects : projects).map(item => <tr key={item.id}>
             <th><Link to={gatewayQuery(tracePath(item.name), {key})}>{item.name}</Link></th>
             <td>{item.rules}</td>
+            <td>{item.requests.toLocaleString()}</td>
             <td><select aria-label={`Parent for ${item.name}`} value={item.parent ?? ''} onChange={event => {
               api.request(`/projects/${item.id}/inheritance`, 'PUT', {parent: event.target.value || null})
                 .then(refresh).catch(error => setError(error.message));
@@ -423,17 +428,14 @@ function Workspace({api, logout, section, project, traceId, models}: {
             close={() => void navigate(gatewayQuery(sectionPaths.projects, {key}))}/>}
         </>}
       </section>
-      {section === 'traces' && active && <ReviewPanel key={active.cell.run_id} api={api}
-        initial={active.cell} trace={active.trace} mode={query.review ?? mode} close={close}
-        refresh={refresh} saveFile={saveFile} busy={busy}
-        language={language ?? languageForPath(active.trace.file_path)}
+      {section === 'traces' && active && <ReviewPanel key={`${active.id}:${current?.run_id ?? 'all'}`} api={api}
+        cell={current} trace={active} mode={mode} close={close}
+        refresh={refresh} saveFile={saveFile} saveRange={saveRange} busy={busy}
+        language={language ?? languageForPath(active.file_path)}
         onLanguage={syntax => void setQuery({syntax})}
-        onMode={review => void setQuery({review})}
+        onMode={changeMode}
         selectedRange={query.range} onRange={range => void setQuery({range: rangeParam(range)})}
-        showContext={query.context} onContext={context => void setQuery({context})}
-        showRuleHistory={query.ruleHistory} onRuleHistory={ruleHistory => void setQuery({ruleHistory})}
-        showProviderHistory={query.providerRequests} onProviderHistory={providerRequests => void setQuery({providerRequests})}
-        canGoPrevious={Boolean(adjacent(-1))} canGoNext={Boolean(adjacent(1))} goAdjacent={openAdjacent}/>}
+        onAllRules={() => open(active, undefined, mode)}/>}
 
     </main>
   </>;

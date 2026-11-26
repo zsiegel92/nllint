@@ -1,5 +1,6 @@
 export type Label = boolean | null;
 export type Mode = 'files' | 'adjudication' | 'ranges';
+export type ReviewMode = 'files' | 'ranges';
 export type Range = {
   start: number;
   end: number;
@@ -14,15 +15,28 @@ export type Cell = {
   pair_id: number;
   batch_id: string;
   rule_id: string;
+  rule_version: string;
+  rule_hash: string;
   rule_path: string;
   file_confidence: number | null;
   file_decision: Label;
   file_label: Label;
+  ranges_checked: boolean;
   stage: 'file' | 'ranges' | 'adjudication' | 'ready' | 'failed';
   error: string | null;
   ranges: Range[];
 };
 export type Run = Cell & {file_path: string; source: string; rule: string; langfuse_url: string | null};
+export type RuleVersion = {
+  id: string;
+  name: string;
+  path: string;
+  hash: string;
+  project: string;
+  file_positives: number;
+  range_positives: number;
+  adjudicated_positives: number;
+};
 export type Trace = {
   id: string;
   file_path: string;
@@ -30,10 +44,11 @@ export type Trace = {
   project_id: number;
   key_name: string;
   created_at: string;
+  score: number;
   cells: Cell[];
 };
 export type Key = {id: number; name: string; prefix: string; revoked_at: string | null};
-export type Project = {id: number; name: string; parent: string | null; rules: number};
+export type Project = {id: number; name: string; parent: string | null; rules: number; requests: number};
 export type RangeServiceTier = 'flex' | 'fast';
 export type Provider = {base_url: string; model: string; service_tier?: RangeServiceTier; custom_key: boolean; overridden: boolean};
 export type Routing = {decision: Provider; ranges: Provider};

@@ -19,10 +19,37 @@ from .routing import RoutingEdit
 
 router = APIRouter(prefix="/api", dependencies=[Depends(operator)])
 
-CELL = """
+FILE_POSITIVE_POINTS = 1
+RANGE_POSITIVE_POINTS = 2
+ADJUDICATED_POSITIVE_POINTS = 3
+
+# Source text is already content-addressed. Scope each version to the supplied
+# rule ID and path in its project, independent of the API key that submitted it.
+RULE_VERSION_ID = """
+encode(sha256(convert_to(
+    jsonb_build_array(f.project_id, tr.rule_id, f.rule_path, f.rule_hash)::text, 'UTF8'
+)), 'hex')
+"""
+RANGE_COUNTS = """
+CROSS JOIN LATERAL (
+    SELECT
+        (SELECT count(*) FROM range_candidates c WHERE c.run_id=r.id) AS range_positives,
+        (SELECT count(*) FROM questions a
+         WHERE a.run_id=r.id AND a.stage='adjudication' AND a.decision) AS adjudicated_positives
+) counts
+"""
+TRACE_SORTS = {
+    "relevance": "scored.score DESC, t.created_at DESC, t.id",
+    "newest": "t.created_at DESC, t.id",
+}
+
+CELL = f"""
     SELECT r.id AS run_id, r.batch_id, r.stage, r.error, f.id AS pair_id,
            f.file_label, f.rule_path, f.file_hash, f.rule_hash, tr.rule_id,
-           tr.trace_id, q.decision AS file_decision, q.confidence AS file_confidence
+           tr.trace_id, {RULE_VERSION_ID} AS rule_version,
+           q.decision AS file_decision, q.confidence AS file_confidence,
+           EXISTS (SELECT 1 FROM questions discovery
+                   WHERE discovery.run_id=r.id AND discovery.stage='ranges') AS ranges_checked
     FROM trace_runs tr JOIN runs r ON r.id=tr.run_id
     JOIN file_rules f ON f.id=r.pair_id
     LEFT JOIN questions q ON q.run_id=r.id AND q.stage='file'
@@ -97,10 +124,18 @@ async def projects(request: Request, key_id: int | None = None):
             dict(row)
             for row in await conn.fetch(
                 """
-            SELECT p.name,p.id,parent.name AS parent, count(DISTINCT f.rule_path)::int AS rules
+            SELECT p.name,p.id,parent.name AS parent, coalesce(r.rules,0) AS rules,
+                   coalesce(t.requests,0) AS requests
             FROM projects p LEFT JOIN projects parent ON p.parent_id=parent.id
-            LEFT JOIN file_rules f ON f.project_id=p.id AND ($1::bigint IS NULL OR f.key_id=$1)
-            WHERE $1::bigint IS NULL OR f.id IS NOT NULL GROUP BY p.id,parent.name ORDER BY p.name
+            LEFT JOIN (
+                SELECT project_id, count(DISTINCT rule_path)::int AS rules
+                FROM file_rules WHERE $1::bigint IS NULL OR key_id=$1 GROUP BY project_id
+            ) r ON r.project_id=p.id
+            LEFT JOIN (
+                SELECT project_id, count(*) AS requests
+                FROM traces WHERE $1::bigint IS NULL OR key_id=$1 GROUP BY project_id
+            ) t ON t.project_id=p.id
+            WHERE $1::bigint IS NULL OR t.requests IS NOT NULL ORDER BY p.name
         """,
                 key_id,
             )
@@ -116,7 +151,7 @@ async def create_project(body: NewProject, request: Request):
         )
         if project is None:
             raise HTTPException(409, "A project with this name already exists")
-    return {**dict(project), "parent": None, "rules": 0}
+    return {**dict(project), "parent": None, "rules": 0, "requests": 0}
 
 
 @router.put("/projects/{project_id}/inheritance", status_code=204)
@@ -204,6 +239,51 @@ async def history(project_id: int, rule: str, request: Request):
         ]
 
 
+@router.get("/rules")
+async def rules(
+    request: Request,
+    key_id: int | None = None,
+    project: str | None = None,
+    trace_id: str | None = None,
+    search: str = Query("", max_length=200),
+    rule_version: list[str] = Query(default=[]),
+):
+    async with request_db(request, readonly=True) as conn:
+        rows = await conn.fetch(
+            f"""
+            WITH versions AS (
+                SELECT DISTINCT r.id AS run_id, {RULE_VERSION_ID} AS id,
+                       tr.rule_id AS name,f.rule_path AS path,f.rule_hash AS hash,p.name AS project
+                FROM trace_runs tr JOIN runs r ON r.id=tr.run_id
+                JOIN file_rules f ON f.id=r.pair_id JOIN projects p ON p.id=f.project_id
+                WHERE ($1::bigint IS NULL OR f.key_id=$1) AND ($2::text IS NULL OR p.name=$2)
+                AND ($3::text IS NULL OR tr.trace_id=$3)
+            ), picked AS (
+                SELECT id,name,path,hash,project FROM versions
+                WHERE strpos(lower(name),lower($4)) > 0 OR id=ANY($5::text[])
+                OR $4='' OR strpos(lower(path),lower($4)) > 0
+                GROUP BY id,name,path,hash,project
+                ORDER BY id=ANY($5::text[]) DESC,name,path,project,hash LIMIT 60
+            )
+            SELECT p.id,p.name,p.path,p.hash,p.project,
+                   count(*) FILTER (WHERE q.decision)::int AS file_positives,
+                   sum(counts.range_positives)::int AS range_positives,
+                   sum(counts.adjudicated_positives)::int AS adjudicated_positives
+            FROM picked p JOIN versions v ON v.id=p.id JOIN runs r ON r.id=v.run_id
+            LEFT JOIN questions q ON q.run_id=r.id AND q.stage='file'
+            {RANGE_COUNTS}
+            GROUP BY p.id,p.name,p.path,p.hash,p.project
+            ORDER BY p.id=ANY($5::text[]) DESC,p.name,p.path,p.project,p.hash
+            """,
+            key_id,
+            project,
+            trace_id,
+            search.strip(),
+            rule_version,
+        )
+    return [dict(row) for row in rows]
+
+
 @router.get("/traces")
 async def traces(
     request: Request,
@@ -212,6 +292,8 @@ async def traces(
     trace_id: str | None = None,
     rule: str | None = None,
     issue: str = "all",
+    sort: Literal["relevance", "newest"] = "relevance",
+    rule_version: list[str] = Query(default=[]),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
@@ -221,12 +303,27 @@ async def traces(
     async with request_db(request, readonly=True) as conn:
         rows = await conn.fetch(
             f"""
-            SELECT t.id,t.file_path,t.created_at,t.key_id,k.name AS key_name,p.name AS project,p.id AS project_id
+            SELECT t.id,t.file_path,t.created_at,t.key_id,k.name AS key_name,p.name AS project,p.id AS project_id,
+                   scored.score
             FROM traces t JOIN projects p ON p.id=t.project_id JOIN api_keys k ON k.id=t.key_id
+            CROSS JOIN LATERAL (
+                SELECT
+                    sum(CASE WHEN q.decision THEN {FILE_POSITIVE_POINTS} ELSE 0 END
+                        + {RANGE_POSITIVE_POINTS} * counts.range_positives
+                        + {ADJUDICATED_POSITIVE_POINTS} * counts.adjudicated_positives)::bigint AS score,
+                    bool_or(($4::text IS NULL OR f.rule_path=$4) AND ({predicate})
+                        AND (cardinality($7::text[])=0 OR (
+                            q.decision AND {RULE_VERSION_ID}=ANY($7::text[])
+                        ))) AS eligible
+                FROM trace_runs tr JOIN runs r ON r.id=tr.run_id
+                JOIN file_rules f ON f.id=r.pair_id
+                LEFT JOIN questions q ON q.run_id=r.id AND q.stage='file'
+                {RANGE_COUNTS}
+                WHERE tr.trace_id=t.id
+            ) scored
             WHERE ($1::bigint IS NULL OR t.key_id=$1) AND ($2::text IS NULL OR p.name=$2)
-            AND ($3::text IS NULL OR t.id=$3)
-            AND EXISTS ({CELL} WHERE tr.trace_id=t.id AND ($4::text IS NULL OR f.rule_path=$4) AND ({predicate}))
-            ORDER BY t.created_at DESC,t.id LIMIT $5 OFFSET $6
+            AND ($3::text IS NULL OR t.id=$3) AND scored.eligible
+            ORDER BY {TRACE_SORTS[sort]} LIMIT $5 OFFSET $6
         """,
             key_id,
             project,
@@ -234,6 +331,7 @@ async def traces(
             rule,
             limit + 1,
             offset,
+            rule_version,
         )
         page = rows[:limit]
         cells = await conn.fetch(
@@ -278,6 +376,28 @@ async def traces(
         "traces": [{**dict(row), "cells": by_trace[row["id"]]} for row in page],
         "more": len(rows) > limit,
     }
+
+
+@router.get("/traces/{trace_id}/source")
+async def trace_source(trace_id: str, request: Request):
+    async with request_db(request, readonly=True) as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT t.file_path, s.body AS source
+            FROM traces t
+            JOIN LATERAL (
+                SELECT DISTINCT f.key_id, f.file_hash
+                FROM trace_runs tr JOIN runs r ON r.id=tr.run_id
+                JOIN file_rules f ON f.id=r.pair_id WHERE tr.trace_id=t.id
+            ) file ON true
+            JOIN texts s ON (s.key_id,s.hash)=(file.key_id,file.file_hash)
+            WHERE t.id=$1
+        """,
+            trace_id,
+        )
+        if row is None:
+            raise HTTPException(404, "Trace not found")
+    return {"file_path": row["file_path"], "source": row["source"]}
 
 
 async def review_ranges(conn, ids):
@@ -592,8 +712,9 @@ async def export(
     project: str | None = None,
     rule: str | None = None,
     trace_id: str | None = None,
+    rule_version: list[str] = Query(default=[]),
 ):
-    query = """
+    query = f"""
         SELECT f.id AS pair_id,p.name AS project,f.key_id,f.file_path,f.rule_path,f.file_label,
                s.body AS source,t.body AS rule,q.body AS prompt,f.file_hash,f.rule_hash
         FROM file_rules f JOIN projects p ON p.id=f.project_id
@@ -602,15 +723,18 @@ async def export(
         JOIN texts q ON (q.key_id,q.hash)=(f.key_id,f.prompt_hash)
         WHERE ($1::bigint IS NULL OR f.key_id=$1) AND ($2::text IS NULL OR p.name=$2)
         AND ($3::text IS NULL OR f.rule_path=$3) AND f.revision>0
-        AND ($4::text IS NULL OR EXISTS (
+        AND (($4::text IS NULL AND cardinality($5::text[])=0) OR EXISTS (
             SELECT 1 FROM trace_runs tr JOIN runs r ON r.id=tr.run_id
-            WHERE tr.trace_id=$4 AND r.pair_id=f.id
+            WHERE r.pair_id=f.id AND ($4::text IS NULL OR tr.trace_id=$4)
+            AND (cardinality($5::text[])=0 OR {RULE_VERSION_ID}=ANY($5::text[]))
         )) ORDER BY f.id
     """
 
     async def records():
         async with request_db(request, readonly=True) as conn:
-            async for row in conn.cursor(query, key_id, project, rule, trace_id):
+            async for row in conn.cursor(
+                query, key_id, project, rule, trace_id, rule_version
+            ):
                 item = dict(row)
                 pair_id = item.pop("pair_id")
                 label = item.pop("file_label")
