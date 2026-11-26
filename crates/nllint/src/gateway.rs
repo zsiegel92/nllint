@@ -18,6 +18,8 @@ use crate::{
 #[derive(Clone, Deserialize, Serialize)]
 pub struct RuleAnswer {
     pub rule_id: String,
+    #[serde(default)]
+    pub pair_id: Option<i64>,
     pub ranges: Vec<Finding>,
 }
 

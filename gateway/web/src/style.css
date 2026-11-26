@@ -171,3 +171,12 @@ details pre { max-height: 19rem; overflow: auto; }
 .focused-annotation { touch-action: pan-y; }
 .range-focus-navigation { display: flex; align-items: center; gap: .5rem; }
 .range-focus-navigation button { padding: .2rem .45rem; }
+
+.agent-result { border-inline-start: 3px solid #8554b3; }
+.range-marker[data-state="agent"], .range-legend i[data-state="agent"] { background: #8554b3; }
+
+.export label { display: flex; align-items: center; padding: .35rem .6rem; border-left: 1px solid var(--line); }
+.agent-controls { justify-content: flex-start; }
+.agent-controls label { display: flex; align-items: center; gap: .5rem; }
+.range-marker[data-reviewed="true"], .range-legend i[data-reviewed="true"] { border-right: 2px solid #253f38; }
+.range-legend i[data-state="agent"] { border-left-color: #8554b3; }

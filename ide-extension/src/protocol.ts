@@ -18,6 +18,7 @@ export type Region = {
 export type LintDiagnostic = {
 	path: string;
 	ruleId: string;
+	pairId?: number;
 	rulePath: string;
 	message: string;
 	severity: Severity;
@@ -163,6 +164,9 @@ function parseDiagnostic(value: unknown): LintDiagnostic {
 	return {
 		path: text(record.path, "diagnostic.path"),
 		ruleId: text(record.rule_id, "diagnostic.rule_id"),
+		...(record.pair_id == null
+			? {}
+			: { pairId: positiveInteger(record.pair_id, "diagnostic.pair_id") }),
 		rulePath: text(record.rule_path, "diagnostic.rule_path"),
 		message: text(record.message, "diagnostic.message"),
 		severity,

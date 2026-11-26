@@ -87,6 +87,7 @@ async def operator(
             and request.headers.get("X-NLLint-UI") != "1"
         ):
             raise HTTPException(403, "Missing control-plane header")
+        request.state.web_session = True
         request.state.user_id = session["id"]
         return session["id"]
     raise HTTPException(401, "Sign in required")
@@ -184,9 +185,13 @@ async def github_start(request: Request):
     ):
         destination = "/"
     path = urlsplit(destination).path
-    if path not in {"/", "/traces", "/pipelines", "/api-keys"} and not path.startswith(
-        ("/traces/", "/pipelines/", "/find-ranges/")
-    ):
+    if path not in {
+        "/",
+        "/traces",
+        "/pipelines",
+        "/api-keys",
+        "/agentic-labelers",
+    } and not path.startswith(("/traces/", "/pipelines/", "/find-ranges/")):
         destination = "/"
     callback_host = urlsplit(settings.nllint_app_url).hostname
     if (

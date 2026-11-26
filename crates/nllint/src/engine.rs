@@ -47,6 +47,8 @@ impl RunReport {
 pub struct Violation {
     pub path: PathBuf,
     pub rule_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pair_id: Option<i64>,
     pub rule_path: PathBuf,
     pub message: String,
     pub confidence: f64,
@@ -307,7 +309,7 @@ async fn lint_file(context: Arc<FileContext>, job: FileJob) -> anyhow::Result<Fi
                 context.prompt_hash.clone(),
             ];
             hash::key(
-                "file-rule-v1",
+                "file-rule-v2",
                 &(
                     &context.provider.namespace,
                     &context.sync.version,
@@ -367,7 +369,8 @@ async fn lint_file(context: Arc<FileContext>, job: FileJob) -> anyhow::Result<Fi
     }
     let mut violations = Vec::new();
     for ((answer, selection), (rule, _)) in answers.into_iter().zip(selections).zip(rules) {
-        let ranges = answer.context("missing result")?.ranges;
+        let answer = answer.context("missing result")?;
+        let ranges = answer.ranges;
         let selected = ranges
             .into_iter()
             .filter(|finding| finding.confidence >= selection.setting.threshold)
@@ -376,6 +379,7 @@ async fn lint_file(context: Arc<FileContext>, job: FileJob) -> anyhow::Result<Fi
             violations.push(Violation {
                 path: path.clone(),
                 rule_id: rule.id.clone(),
+                pair_id: answer.pair_id,
                 rule_path: rule
                     .source_path
                     .strip_prefix(&context.root)

@@ -204,7 +204,11 @@ async def read_result(conn, trace_id, key_id):
         **identity,
         "status": "ready",
         "results": [
-            {"rule_id": row["rule_id"], "ranges": by_run.get(row["id"], [])}
+            {
+                "rule_id": row["rule_id"],
+                "pair_id": row["pair_id"],
+                "ranges": by_run.get(row["id"], []),
+            }
             for row in rows
         ],
     }

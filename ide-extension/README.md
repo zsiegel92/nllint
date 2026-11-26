@@ -22,3 +22,7 @@ Set `NLLINT_GATEWAY_BASE_URL` and `NLLINT_GATEWAY_API_KEY` on the extension host
 Run **NLLint: Restart Watchers** after adding external settings or changing credentials. Use **NLLint: Show Output** for errors and precondition output. Set `nllint.trace.server` to `messages` or `verbose` to inspect the watch protocol.
 
 For development, run `pnpm install --frozen-lockfile`, `pnpm check`, and `pnpm build` in this directory.
+
+## Annotate a diagnostic
+
+On a saved file, open **Quick Fix** for an NLLint diagnostic and choose **NLLint: Confirm violation** or **NLLint: Mark as no violation**. The gateway verifies the file version and records the key owner as the human labeler with IDE attribution. The watcher picks up the annotation through normal gateway sync. This requires a CLI and gateway version that provide the diagnostic’s file–rule pair ID.

@@ -16,6 +16,8 @@ from fastapi.testclient import TestClient
 from nllint_gateway.contracts import LineRange
 from nllint_gateway.main import app
 from nllint_gateway.providers import Providers
+from pydantic_ai.messages import ModelResponse, ToolCallPart, ToolReturnPart
+from pydantic_ai.models.function import FunctionModel
 
 UI = {"X-NLLint-UI": "1"}
 
@@ -185,7 +187,12 @@ class GatewayTest(unittest.TestCase):
             self.assertTrue(all(not item["reused"] for item in history["requests"]))
 
             renamed = self.submit(client, key, {**data, "path": "renamed.py"})
-            self.assertEqual(self.wait(client, key, renamed), ready)
+            renamed_ready = self.wait(client, key, renamed)
+            self.assertEqual(
+                [(row["rule_id"], row["ranges"]) for row in renamed_ready],
+                [(row["rule_id"], row["ranges"]) for row in ready],
+            )
+            self.assertNotEqual(renamed_ready[0]["pair_id"], ready[0]["pair_id"])
             self.assertEqual(
                 len(calls), 3, "a different path reused the three model stages"
             )
@@ -310,6 +317,195 @@ class GatewayTest(unittest.TestCase):
                 client.get("/api/export/ranges").text,
             )
 
+            self.assertEqual(annotated["labeler_identity"]["user_id"], user)
+            self.assertEqual(annotated["labeler_identity"]["origin"], "webapp")
+            self.assertEqual(len(annotated["labeler_identity"]["signature"]), 64)
+            self.assertEqual(ready[0]["pair_id"], first["pair_id"])
+            self.assertEqual(client.post("/v1/traces/search", json={}).status_code, 401)
+            search = {"path": "a.py", "source_text": "d", "min_confidence": 0.8}
+            self.assertEqual(
+                self.json(client.post("/v1/traces/search", headers=key, json=search))[
+                    "traces"
+                ][0]["id"],
+                trace_id,
+            )
+            mcp_request = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "search_traces", "arguments": {"query": search}},
+            }
+            mcp_headers = {
+                **key,
+                "Accept": "application/json, text/event-stream",
+                "MCP-Protocol-Version": "2025-06-18",
+            }
+            self.assertEqual(client.post("/mcp", json=mcp_request).status_code, 401)
+            mcp_response = self.json(
+                client.post("/mcp", json=mcp_request, headers=mcp_headers)
+            )
+            self.assertFalse(mcp_response["result"].get("isError"), mcp_response)
+            self.assertEqual(
+                mcp_response["result"]["structuredContent"]["traces"][0]["id"], trace_id
+            )
+
+            write = self.json(
+                client.post(
+                    "/mcp",
+                    headers=mcp_headers,
+                    json={
+                        **mcp_request,
+                        "params": {
+                            "name": "annotate_range",
+                            "arguments": {
+                                "pair_id": first["pair_id"],
+                                "start": 1,
+                                "end": 1,
+                                "decision": False,
+                                "identity": {
+                                    "type": "BOT",
+                                    "model": "example/reviewer",
+                                },
+                            },
+                        },
+                    },
+                )
+            )
+            self.assertEqual(write["result"]["structuredContent"], {"decision": False})
+            run = self.json(client.get(f"/v1/runs/{first['run_id']}", headers=key))
+            self.assertEqual(
+                run["ranges"][0]["labeler_identity"],
+                {
+                    "type": "BOT",
+                    "origin": "api",
+                    "model": "example/reviewer",
+                },
+            )
+
+            labeler = self.json(
+                client.post(
+                    "/api/agentic-labelers",
+                    headers=UI,
+                    json={
+                        "name": "Test labeler",
+                        "model": "example/reasoning",
+                        "max_tool_calls": 1,
+                    },
+                ),
+                201,
+            )
+
+            def mock_agent(messages, info):
+                if info.function_tools:
+                    return ModelResponse(
+                        parts=[
+                            ToolCallPart(
+                                "search_files",
+                                {
+                                    "query": {"path": "renamed.py"},
+                                    "start_line": 1,
+                                },
+                            )
+                        ]
+                    )
+                context = next(
+                    part
+                    for message in messages
+                    for part in message.parts
+                    if isinstance(part, ToolReturnPart)
+                    and part.tool_name == "search_files"
+                )
+                self.assertEqual(context.content[0]["path"], "renamed.py")
+                self.assertEqual(
+                    context.content[0]["source"], data["source"].rstrip("\n")
+                )
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            info.output_tools[0].name,
+                            {
+                                "ranges": [{"start": 1, "end": 1}],
+                            },
+                        )
+                    ]
+                )
+
+            with patch(
+                "nllint_gateway.agentic.OpenRouterModel",
+                return_value=FunctionModel(mock_agent),
+            ):
+                agentic = self.json(
+                    client.post(
+                        f"/api/runs/{first['run_id']}/agentic-label",
+                        headers=UI,
+                        json={"labeler_id": labeler["id"]},
+                    )
+                )
+            self.assertTrue(agentic["violates"])
+            self.assertEqual(agentic["labeler_identity"]["harness_version"], "1")
+            disagreement = self.json(
+                client.get(
+                    "/api/traces",
+                    params={
+                        "issue": "agent-disagreements",
+                        "sort": "confidence-desc",
+                        "trace_id": trace_id,
+                    },
+                )
+            )
+            self.assertEqual(
+                disagreement["traces"][0]["matching_run_ids"], [first["run_id"]]
+            )
+            exported = client.get(
+                "/api/export/ranges",
+                params={"trace_id": trace_id, "include_agentic": True},
+            )
+            self.assertIn('"coverage": "agentic"', exported.text)
+            self.assertIn('"origin": "agentic"', exported.text)
+            self.assertNotIn(
+                '"origin": "agentic"', client.get("/api/export/ranges").text
+            )
+
+            editor_path = f"/v1/editor/pairs/{first['pair_id']}/range"
+            editor = {"source": data["source"], "start": 2, "end": 3, "decision": True}
+            self.assertEqual(
+                client.put(
+                    editor_path, headers=key, json={**editor, "source": "stale"}
+                ).status_code,
+                409,
+            )
+            self.json(client.put(editor_path, headers=key, json=editor))
+            run = self.json(client.get(f"/v1/runs/{first['run_id']}", headers=key))
+            self.assertEqual(
+                next(
+                    region["labeler_identity"]
+                    for region in run["ranges"]
+                    if region["start"] == 2
+                ),
+                {"type": "HUMAN", "origin": "ide", "user_id": user},
+            )
+            self.assertEqual(
+                client.put(
+                    f"/v1/pairs/{first['pair_id']}/file",
+                    headers=key,
+                    json={
+                        "decision": True,
+                        "labeler_type": "HUMAN",
+                        "labeler_identity": {"type": "HUMAN", "user_id": other},
+                    },
+                ).status_code,
+                422,
+            )
+            self.json(
+                client.put(
+                    f"/v1/pairs/{first['pair_id']}/file",
+                    headers=key,
+                    json={"decision": True},
+                )
+            )
+            run = self.json(client.get(f"/v1/runs/{first['run_id']}", headers=key))
+            self.assertEqual(run["labeler_identity"], {"type": "BOT", "origin": "api"})
+
             project_id = trace["project_id"]
             self.assertEqual(registered["id"], project_id)
             path = f"/api/projects/{project_id}/routing"
@@ -378,6 +574,20 @@ class GatewayTest(unittest.TestCase):
             )
             self.assertEqual(client.get("/api/export/adjudication").text, "")
             self.assertEqual(client.get("/api/export/all").text, "")
+            self.assertEqual(
+                client.get(
+                    f"/v1/runs/{first['run_id']}", headers=other_key
+                ).status_code,
+                404,
+            )
+            foreign = self.json(
+                client.post(
+                    "/v1/traces/search",
+                    headers=other_key,
+                    json={"trace_id": trace_id},
+                )
+            )
+            self.assertEqual(foreign["traces"], [])
             self.wait(client, other_key, self.submit(client, other_key, data))
             self.assertNotEqual(
                 self.json(client.get("/api/traces"))["traces"][0]["project_id"],

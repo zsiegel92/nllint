@@ -86,6 +86,8 @@ Vite defaults to [localhost:5175](http://localhost:5175) and FastAPI defaults to
 - `make cli-build` and `make cli-release` compile the Rust CLI. `make cli-install` installs it. Use `make cli-run ARGS="--dry-run"` or `make cli-watch ARGS="--stream"` to pass flags through.
 - `make test` runs Rust, gateway, and extension tests. Set `NLLINT_TEST_DATABASE_URL` in your shell to include Postgres integration tests against a disposable database with the gateway schema. Use `make check` for Rust and Python static checks.
 
+The gateway exposes its bearer-authenticated Streamable HTTP MCP server at `/mcp` and a declarative REST search at `POST /v1/traces/search`. See the [NLLint skill](skills/nllint/SKILL.md) for client setup, query examples, in-band annotations, and false-positive calibration. Apply the database migration before using agentic labelers or annotation attribution.
+
 Regenerate config schemas after changing the Rust settings types:
 
 ```sh

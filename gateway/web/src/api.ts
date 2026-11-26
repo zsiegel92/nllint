@@ -1,3 +1,11 @@
+export type Identity = {type: 'HUMAN' | 'BOT'; origin: string; name?: string; model?: string; user_id?: number};
+export type Labeler = {id: number; name: string; model: string; max_tool_calls: number};
+export type AgentLabel = {labeler_id: number; violates: boolean; labeler_identity: Identity; ranges: {start: number; end: number}[]};
+export const attribution = (identity: Identity | null) => identity?.type === 'BOT'
+  ? `Bot${identity.name || identity.model ? ` · ${identity.name || identity.model}` : ''}`
+  : identity?.origin === 'webapp' ? 'Human · web'
+  : identity?.origin === 'ide' ? 'Human · IDE'
+  : identity?.type === 'HUMAN' ? 'Human · API' : 'Legacy annotation';
 export type Label = boolean | null;
 export type Mode = 'files' | 'adjudication' | 'ranges';
 export type ReviewMode = 'files' | 'ranges';
@@ -7,6 +15,8 @@ export type Range = {
   model_decision: Label;
   confidence: number | null;
   annotation: Label;
+  labeler_identity: Identity | null;
+  agent?: {id: number; name: string};
   candidate: boolean;
   preview?: string;
 };
@@ -21,6 +31,8 @@ export type Cell = {
   file_confidence: number | null;
   file_decision: Label;
   file_label: Label;
+  labeler_identity: Identity | null;
+  agentic_labels: AgentLabel[];
   ranges_checked: boolean;
   stage: 'file' | 'ranges' | 'adjudication' | 'ready' | 'failed';
   error: string | null;
@@ -45,6 +57,7 @@ export type Trace = {
   key_name: string;
   created_at: string;
   score: number;
+  matching_run_ids: number[];
   cells: Cell[];
 };
 export type Key = {id: number; name: string; prefix: string; revoked_at: string | null};
@@ -95,11 +108,11 @@ export class Api {
   }
 
   file(pair: number, run: number, decision: Label, rejectAll = false) {
-    return this.json(`/pairs/${pair}/file`, 'PUT', {decision, reject_all: rejectAll, run_id: run});
+    return this.json(`/pairs/${pair}/file`, 'PUT', {decision, labeler_type: 'HUMAN', reject_all: rejectAll, run_id: run});
   }
 
   range(pair: number, start: number, end: number, decision: Label) {
-    return this.json(`/pairs/${pair}/range`, 'PUT', {start, end, decision});
+    return this.json(`/pairs/${pair}/range`, 'PUT', {start, end, decision, labeler_type: 'HUMAN'});
   }
 }
 

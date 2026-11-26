@@ -3,11 +3,13 @@ from collections import defaultdict
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import Field
 from fastapi.responses import StreamingResponse
 
-from .auth import digest_key, mint_key, operator
+from .auth import digest_key, mint_key, operator, sign
 from .contracts import (
     FileAnnotation,
+    Strict,
     Inheritance,
     KeyName,
     NewProject,
@@ -41,11 +43,14 @@ CROSS JOIN LATERAL (
 TRACE_SORTS = {
     "relevance": "scored.score DESC, t.created_at DESC, t.id",
     "newest": "t.created_at DESC, t.id",
+    "confidence-asc": "scored.confidence_min ASC NULLS LAST, t.created_at DESC, t.id",
+    "confidence-desc": "scored.confidence_max DESC NULLS LAST, t.created_at DESC, t.id",
+    "path": "t.file_path, t.created_at DESC, t.id",
 }
 
 CELL = f"""
     SELECT r.id AS run_id, r.batch_id, r.stage, r.error, f.id AS pair_id,
-           f.file_label, f.rule_path, f.file_hash, f.rule_hash, tr.rule_id,
+           f.file_label, f.labeler_identity::text AS labeler_identity, f.rule_path, f.file_hash, f.rule_hash, tr.rule_id,
            tr.trace_id, {RULE_VERSION_ID} AS rule_version,
            q.decision AS file_decision, q.confidence AS file_confidence,
            EXISTS (SELECT 1 FROM questions discovery
@@ -77,6 +82,15 @@ FILTERS = {
             SELECT 1 FROM range_annotations l WHERE l.pair_id=f.id
             AND (l.start_line,l.end_line)=(a.start_line,a.end_line)))""",
     "failed": "r.stage='failed'",
+    "low-confidence": "q.confidence <= 0.65",
+    "agent-disagreements": """r.stage='ready' AND EXISTS (
+        SELECT 1 FROM agentic_labels a WHERE a.run_id=r.id AND (
+           (jsonb_array_length(a.ranges)>0) IS DISTINCT FROM q.decision
+           OR ARRAY(SELECT format('%s:%s', value->>'start', value->>'end')
+                    FROM jsonb_array_elements(a.ranges) ORDER BY 1) <>
+              ARRAY(SELECT format('%s:%s', j.start_line, j.end_line)
+                    FROM questions j WHERE j.run_id=r.id AND j.stage='adjudication' AND j.decision ORDER BY 1)
+        ))""",
 }
 
 
@@ -246,7 +260,7 @@ async def rules(
     project: str | None = None,
     trace_id: str | None = None,
     search: str = Query("", max_length=200),
-    rule_version: list[str] = Query(default=[]),
+    rule_version: list[str] = Query(default=[], max_length=100),
 ):
     async with request_db(request, readonly=True) as conn:
         rows = await conn.fetch(
@@ -284,6 +298,84 @@ async def rules(
     return [dict(row) for row in rows]
 
 
+TraceSort = Literal["relevance", "newest", "confidence-asc", "confidence-desc", "path"]
+ANNOTATION_FILTERS = {"disagreements", "unreviewed", "agent-disagreements"}
+
+
+class TraceSearch(Strict):
+    key_id: int | None = None
+    project: str | None = None
+    trace_id: str | None = None
+    rule: str | None = None
+    rule_version: list[str] = Field(default_factory=list, max_length=100)
+    positive_rule_versions_only: bool = False
+    issues: list[str] = Field(default_factory=list, max_length=12)
+    match: Literal["all", "any"] = "all"
+    path: str | None = Field(default=None, max_length=500)
+    source_text: str | None = Field(default=None, max_length=500)
+    min_confidence: float | None = Field(default=None, ge=0, le=1)
+    max_confidence: float | None = Field(default=None, ge=0, le=1)
+    sort: TraceSort = "relevance"
+    limit: int = Field(default=20, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+
+async def search_rows(conn, search: TraceSearch, *, pipeline_only=False):
+    allowed = FILTERS.keys() - ANNOTATION_FILTERS if pipeline_only else FILTERS.keys()
+    if any(issue not in allowed for issue in search.issues):
+        raise HTTPException(400, "Unknown or unavailable issue filter")
+    joiner = " AND " if search.match == "all" else " OR "
+    predicate = joiner.join(f"({FILTERS[issue]})" for issue in search.issues) or "TRUE"
+    rule_match = f"{RULE_VERSION_ID}=ANY($7::text[])"
+    if search.positive_rule_versions_only:
+        rule_match = f"q.decision AND ({rule_match})"
+    eligible = f"""($4::text IS NULL OR f.rule_path=$4) AND ({predicate})
+        AND (cardinality($7::text[])=0 OR ({rule_match}))
+        AND ($10::double precision IS NULL OR q.confidence >= $10)
+        AND ($11::double precision IS NULL OR q.confidence <= $11)"""
+    return await conn.fetch(
+        f"""
+        SELECT t.id,t.file_path,t.created_at,t.key_id,k.name AS key_name,p.name AS project,p.id AS project_id,
+               scored.score,scored.confidence_min,scored.confidence_max,scored.matching_run_ids
+        FROM traces t JOIN projects p ON p.id=t.project_id JOIN api_keys k ON k.id=t.key_id
+        CROSS JOIN LATERAL (
+            SELECT
+                sum(CASE WHEN q.decision THEN {FILE_POSITIVE_POINTS} ELSE 0 END
+                    + {RANGE_POSITIVE_POINTS} * counts.range_positives
+                    + {ADJUDICATED_POSITIVE_POINTS} * counts.adjudicated_positives)::bigint AS score,
+                min(q.confidence) FILTER (WHERE match.eligible) AS confidence_min,
+                max(q.confidence) FILTER (WHERE match.eligible) AS confidence_max,
+                array_agg(r.id ORDER BY r.id) FILTER (WHERE match.eligible) AS matching_run_ids
+            FROM trace_runs tr JOIN runs r ON r.id=tr.run_id
+            JOIN file_rules f ON f.id=r.pair_id
+            LEFT JOIN questions q ON q.run_id=r.id AND q.stage='file'
+            {RANGE_COUNTS}
+            CROSS JOIN LATERAL (SELECT {eligible} AS eligible) match
+            WHERE tr.trace_id=t.id
+            AND ($9::text IS NULL OR EXISTS (
+                SELECT 1 FROM texts body WHERE (body.key_id,body.hash)=(f.key_id,f.file_hash)
+                AND strpos(lower(body.body),lower($9))>0
+            ))
+        ) scored
+        WHERE ($1::bigint IS NULL OR t.key_id=$1) AND ($2::text IS NULL OR p.name=$2)
+        AND ($3::text IS NULL OR t.id=$3) AND scored.matching_run_ids IS NOT NULL
+        AND ($8::text IS NULL OR strpos(lower(t.file_path),lower($8))>0)
+        ORDER BY {TRACE_SORTS[search.sort]} LIMIT $5 OFFSET $6
+        """,
+        search.key_id,
+        search.project,
+        search.trace_id,
+        search.rule,
+        search.limit + 1,
+        search.offset,
+        search.rule_version,
+        search.path,
+        search.source_text,
+        search.min_confidence,
+        search.max_confidence,
+    )
+
+
 @router.get("/traces")
 async def traces(
     request: Request,
@@ -292,47 +384,35 @@ async def traces(
     trace_id: str | None = None,
     rule: str | None = None,
     issue: str = "all",
-    sort: Literal["relevance", "newest"] = "relevance",
-    rule_version: list[str] = Query(default=[]),
+    sort: TraceSort = "relevance",
+    rule_version: list[str] = Query(default=[], max_length=100),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    predicate = FILTERS.get(issue)
-    if predicate is None:
-        raise HTTPException(400, "Unknown issue filter")
+    return await search_traces(
+        TraceSearch(
+            key_id=key_id,
+            project=project,
+            trace_id=trace_id,
+            rule=rule,
+            positive_rule_versions_only=issue
+            not in {"low-confidence", "agent-disagreements"},
+            issues=[issue],
+            sort=sort,
+            rule_version=rule_version,
+            limit=limit,
+            offset=offset,
+        ),
+        request,
+    )
+
+
+@router.post("/traces/search")
+async def search_traces(body: TraceSearch, request: Request):
+    limit = body.limit
+    rule = body.rule
     async with request_db(request, readonly=True) as conn:
-        rows = await conn.fetch(
-            f"""
-            SELECT t.id,t.file_path,t.created_at,t.key_id,k.name AS key_name,p.name AS project,p.id AS project_id,
-                   scored.score
-            FROM traces t JOIN projects p ON p.id=t.project_id JOIN api_keys k ON k.id=t.key_id
-            CROSS JOIN LATERAL (
-                SELECT
-                    sum(CASE WHEN q.decision THEN {FILE_POSITIVE_POINTS} ELSE 0 END
-                        + {RANGE_POSITIVE_POINTS} * counts.range_positives
-                        + {ADJUDICATED_POSITIVE_POINTS} * counts.adjudicated_positives)::bigint AS score,
-                    bool_or(($4::text IS NULL OR f.rule_path=$4) AND ({predicate})
-                        AND (cardinality($7::text[])=0 OR (
-                            q.decision AND {RULE_VERSION_ID}=ANY($7::text[])
-                        ))) AS eligible
-                FROM trace_runs tr JOIN runs r ON r.id=tr.run_id
-                JOIN file_rules f ON f.id=r.pair_id
-                LEFT JOIN questions q ON q.run_id=r.id AND q.stage='file'
-                {RANGE_COUNTS}
-                WHERE tr.trace_id=t.id
-            ) scored
-            WHERE ($1::bigint IS NULL OR t.key_id=$1) AND ($2::text IS NULL OR p.name=$2)
-            AND ($3::text IS NULL OR t.id=$3) AND scored.eligible
-            ORDER BY {TRACE_SORTS[sort]} LIMIT $5 OFFSET $6
-        """,
-            key_id,
-            project,
-            trace_id,
-            rule,
-            limit + 1,
-            offset,
-            rule_version,
-        )
+        rows = await search_rows(conn, body)
         page = rows[:limit]
         cells = await conn.fetch(
             f"""
@@ -343,6 +423,7 @@ async def traces(
             rule,
         )
         ranges = await review_ranges(conn, list({row["run_id"] for row in cells}))
+        labels = await agent_labels(conn, [cell["run_id"] for cell in cells])
         with_ranges = {row["pair_id"] for row in cells if ranges.get(row["run_id"])}
         sources = await conn.fetch(
             """
@@ -370,7 +451,7 @@ async def traces(
     by_trace = defaultdict(list)
     for cell in cells:
         by_trace[cell["trace_id"]].append(
-            {**dict(cell), "ranges": ranges[cell["run_id"]]}
+            {**review_cell(cell, labels), "ranges": ranges[cell["run_id"]]}
         )
     return {
         "traces": [{**dict(row), "cells": by_trace[row["id"]]} for row in page],
@@ -408,7 +489,7 @@ async def review_ranges(conn, ids):
             SELECT coalesce(c.start_line,l.start_line) AS start,
                    coalesce(c.end_line,l.end_line) AS end,
                    q.decision AS model_decision,q.confidence,
-                   l.decision AS annotation, c.run_id IS NOT NULL AS candidate
+                   l.decision AS annotation, l.labeler_identity::text AS labeler_identity, c.run_id IS NOT NULL AS candidate
             FROM (SELECT * FROM range_candidates WHERE run_id=r.id) c
             FULL JOIN (SELECT * FROM range_annotations WHERE pair_id=r.pair_id) l USING (start_line,end_line)
             LEFT JOIN questions q ON q.run_id=r.id AND q.stage='adjudication'
@@ -421,6 +502,7 @@ async def review_ranges(conn, ids):
     by_run = defaultdict(list)
     for row in rows:
         region = dict(row)
+        region["labeler_identity"] = decode_identity(region["labeler_identity"])
         by_run[region.pop("run_id")].append(region)
     return by_run
 
@@ -445,12 +527,18 @@ async def detail(run_id: int, request: Request):
             row["pair_id"],
         )
         ranges = (await review_ranges(conn, [run_id]))[run_id]
+        labels = await agent_labels(conn, [run_id])
     settings = request.app.state.settings
     trace = request.app.state.providers.trace_id(row["batch_id"])
     langfuse_url = None
     if settings.langfuse_project_id:
         langfuse_url = f"{settings.langfuse_base_url.rstrip('/')}/project/{settings.langfuse_project_id}/traces/{trace}"
-    return {**dict(row), **dict(source), "ranges": ranges, "langfuse_url": langfuse_url}
+    return {
+        **review_cell(row, labels),
+        **dict(source),
+        "ranges": ranges,
+        "langfuse_url": langfuse_url,
+    }
 
 
 @router.get("/runs/{run_id}/provider-requests")
@@ -532,9 +620,68 @@ async def revision(conn, pair):
     )
 
 
+def decode_identity(raw):
+    return json.loads(raw) if raw else None
+
+
+async def agent_labels(conn, ids):
+    labels = defaultdict(list)
+    for row in await conn.fetch(
+        """
+        SELECT run_id,labeler_id,ranges::text,labeler_identity::text
+        FROM agentic_labels WHERE run_id=ANY($1::bigint[]) ORDER BY labeler_id
+    """,
+        ids,
+    ):
+        ranges = json.loads(row["ranges"])
+        labels[row["run_id"]].append(
+            {
+                "labeler_id": row["labeler_id"],
+                "ranges": ranges,
+                "violates": bool(ranges),
+                "labeler_identity": json.loads(row["labeler_identity"]),
+            }
+        )
+    return labels
+
+
+def review_cell(row, labels):
+    return {
+        **dict(row),
+        "labeler_identity": decode_identity(row["labeler_identity"]),
+        "agentic_labels": labels[row["run_id"]],
+    }
+
+
+def annotation_identity(request, body, target):
+    if body.decision is None:
+        return None
+    identity = body.labeler_identity
+    web = getattr(request.state, "web_session", False)
+    kind = body.labeler_type or (
+        identity.type if identity else "HUMAN" if web else "BOT"
+    )
+    data = identity.model_dump(exclude_none=True) if identity else {"type": kind}
+    data["origin"] = getattr(request.state, "annotation_origin", "api")
+    if kind == "HUMAN":
+        user_id = request.state.user_id
+        if identity and identity.user_id not in (None, user_id):
+            raise HTTPException(422, "The human labeler must be the authenticated user")
+        data["user_id"] = user_id
+        if web:
+            data["origin"] = "webapp"
+            data["signature"] = sign(
+                json.dumps([user_id, target, body.decision]),
+                "human-labeled-via-webapp",
+                request,
+            )
+    return json.dumps(data)
+
+
 @router.put("/pairs/{pair_id}/file")
 async def annotate_file(pair_id: int, body: FileAnnotation, request: Request):
     settings = request.app.state.settings
+    labeler = annotation_identity(request, body, ["file", pair_id])
     async with request_db(request) as conn:
         pair = await lock_pair(conn, pair_id)
         if body.reject_all and body.decision is not False:
@@ -549,14 +696,17 @@ async def annotate_file(pair_id: int, body: FileAnnotation, request: Request):
         )
         routing = request.app.state.routing
         version = routing.version(routing.effective(project_settings))
-        changed = pair["file_label"] != body.decision
+        changed = pair["file_label"] != body.decision or decode_identity(
+            pair["labeler_identity"]
+        ) != decode_identity(labeler)
         if changed:
             await conn.execute(
                 """
-                UPDATE file_rules SET file_label=$2,file_labeled_at=now(),force_requested=false WHERE id=$1
+                UPDATE file_rules SET file_label=$2,file_labeled_at=now(),force_requested=false,labeler_identity=$3::jsonb WHERE id=$1
             """,
                 pair_id,
                 body.decision,
+                labeler,
             )
             if body.decision:
                 await schedule(
@@ -586,17 +736,36 @@ async def annotate_file(pair_id: int, body: FileAnnotation, request: Request):
                     pair_id,
                 )
         if body.reject_all:
-            await conn.execute(
+            candidates = await conn.fetch(
                 """
-                INSERT INTO range_annotations(pair_id,start_line,end_line,decision)
-                SELECT $1::bigint,c.start_line,c.end_line,false
+                SELECT c.start_line,c.end_line
                 FROM runs r JOIN range_candidates c ON c.run_id=r.id WHERE r.pair_id=$1
                 AND (r.id=$2::bigint OR ($2::bigint IS NULL AND r.version=$3))
-                ON CONFLICT (pair_id,start_line,end_line) DO UPDATE SET decision=false,updated_at=now()
             """,
                 pair_id,
                 body.run_id,
                 version,
+            )
+            await conn.executemany(
+                """
+                INSERT INTO range_annotations(pair_id,start_line,end_line,decision,labeler_identity)
+                VALUES ($1,$2,$3,false,$4::jsonb)
+                ON CONFLICT (pair_id,start_line,end_line) DO UPDATE
+                SET decision=false,updated_at=now(),labeler_identity=EXCLUDED.labeler_identity
+            """,
+                [
+                    (
+                        pair_id,
+                        row["start_line"],
+                        row["end_line"],
+                        annotation_identity(
+                            request,
+                            body,
+                            ["range", pair_id, row["start_line"], row["end_line"]],
+                        ),
+                    )
+                    for row in candidates
+                ],
             )
         if changed or body.reject_all:
             await revision(conn, pair)
@@ -667,6 +836,9 @@ async def retry_run(conn, run_id):
 
 @router.put("/pairs/{pair_id}/range")
 async def annotate_range(pair_id: int, body: RangeAnnotation, request: Request):
+    labeler = annotation_identity(
+        request, body, ["range", pair_id, body.start, body.end]
+    )
     async with request_db(request) as conn:
         pair = await lock_pair(conn, pair_id)
         source = await conn.fetchval(
@@ -689,14 +861,16 @@ async def annotate_range(pair_id: int, body: RangeAnnotation, request: Request):
         else:
             result = await conn.execute(
                 """
-                INSERT INTO range_annotations(pair_id,start_line,end_line,decision) VALUES ($1,$2,$3,$4)
-                ON CONFLICT (pair_id,start_line,end_line) DO UPDATE SET decision=$4,updated_at=now()
+                INSERT INTO range_annotations(pair_id,start_line,end_line,decision,labeler_identity) VALUES ($1,$2,$3,$4,$5::jsonb)
+                ON CONFLICT (pair_id,start_line,end_line) DO UPDATE SET decision=$4,updated_at=now(),labeler_identity=$5::jsonb
                 WHERE range_annotations.decision IS DISTINCT FROM $4
+                   OR range_annotations.labeler_identity IS DISTINCT FROM $5::jsonb
             """,
                 pair_id,
                 body.start,
                 body.end,
                 body.decision,
+                labeler,
             )
             changed = result != "INSERT 0 0"
         if changed:
@@ -705,14 +879,23 @@ async def annotate_range(pair_id: int, body: RangeAnnotation, request: Request):
 
 
 async def training_records(
-    request, key_id, project, rule, trace_id, rule_version, annotated_only
+    request,
+    key_id,
+    project,
+    rule,
+    trace_id,
+    rule_version,
+    annotated_only,
+    include_agentic,
+    *,
+    agent_only=False,
 ):
     query = f"""
         SELECT tr.trace_id,r.id AS run_id,f.id AS pair_id,r.version AS routing_version,
                r.provider_version_id,r.stage,r.error,p.name AS project,f.key_id,
                trace.created_at::text AS trace_created_at,trace.file_path,f.file_hash,
                tr.rule_id,f.rule_path,f.rule_hash,{RULE_VERSION_ID} AS rule_version,
-               f.prompt_hash,f.file_label,s.body AS source,t.body AS rule,pr.body AS prompt,
+               f.prompt_hash,f.file_label,f.labeler_identity::text,s.body AS source,t.body AS rule,pr.body AS prompt,
                COALESCE((SELECT jsonb_agg(
                    jsonb_build_object('stage',q.stage,'start',nullif(q.start_line,0),
                        'end',nullif(q.end_line,0),'decision',q.decision,'confidence',q.confidence,
@@ -731,18 +914,32 @@ async def training_records(
         AND (cardinality($5::text[])=0 OR {RULE_VERSION_ID}=ANY($5::text[]))
         AND (NOT $6::boolean OR f.file_label IS NOT NULL OR EXISTS (
             SELECT 1 FROM range_annotations a WHERE a.pair_id=f.id
-        ))
+        ) OR ($7::boolean AND EXISTS (SELECT 1 FROM agentic_labels a WHERE a.run_id=r.id)))
+        AND (NOT $8::boolean OR EXISTS (SELECT 1 FROM agentic_labels a WHERE a.run_id=r.id))
         ORDER BY tr.trace_id,r.id
     """
     async with request_db(request, readonly=True) as conn:
         cursor = await conn.cursor(
-            query, key_id, project, rule, trace_id, rule_version, annotated_only
+            query,
+            key_id,
+            project,
+            rule,
+            trace_id,
+            rule_version,
+            annotated_only,
+            include_agentic,
+            agent_only,
         )
         while rows := await cursor.fetch(100):
-            ranges = await review_ranges(conn, list({row["run_id"] for row in rows}))
+            ids = list({row["run_id"] for row in rows})
+            ranges = await review_ranges(conn, ids) if not agent_only else {}
+            labels = await agent_labels(conn, ids) if include_agentic else {}
             for row in rows:
                 item = dict(row)
                 item["questions"] = json.loads(item["questions"])
+                item["labeler_identity"] = decode_identity(item["labeler_identity"])
+                if include_agentic:
+                    item["agentic_labels"] = labels[item["run_id"]]
                 lines = source_lines(item["source"])
                 item["ranges"] = [
                     {
@@ -751,9 +948,9 @@ async def training_records(
                             lines[region["start"] - 1 : region["end"]]
                         ),
                     }
-                    for region in ranges[item["run_id"]]
+                    for region in ranges.get(item["run_id"], [])
                 ]
-                yield json.dumps(item, ensure_ascii=False) + "\n"
+                yield item
 
 
 @router.get("/export/{kind}")
@@ -764,10 +961,11 @@ async def export(
     project: str | None = None,
     rule: str | None = None,
     trace_id: str | None = None,
-    rule_version: list[str] = Query(default=[]),
+    rule_version: list[str] = Query(default=[], max_length=100),
+    include_agentic: bool = False,
 ):
     query = f"""
-        SELECT f.id AS pair_id,p.name AS project,f.key_id,f.file_path,f.rule_path,f.file_label,
+        SELECT f.id AS pair_id,p.name AS project,f.key_id,f.file_path,f.rule_path,f.file_label,f.labeler_identity::text,
                s.body AS source,t.body AS rule,q.body AS prompt,f.file_hash,f.rule_hash
         FROM file_rules f JOIN projects p ON p.id=f.project_id
         JOIN texts s ON (s.key_id,s.hash)=(f.key_id,f.file_hash)
@@ -788,6 +986,7 @@ async def export(
                 query, key_id, project, rule, trace_id, rule_version
             ):
                 item = dict(row)
+                item["labeler_identity"] = decode_identity(item["labeler_identity"])
                 pair_id = item.pop("pair_id")
                 label = item.pop("file_label")
                 if kind == "files":
@@ -799,11 +998,18 @@ async def export(
                     continue
                 regions = await conn.fetch(
                     """
-                    SELECT start_line AS start,end_line AS end,decision AS violates
+                    SELECT start_line AS start,end_line AS end,decision AS violates,labeler_identity::text
                     FROM range_annotations WHERE pair_id=$1 ORDER BY start_line,end_line
                 """,
                     pair_id,
                 )
+                regions = [
+                    {
+                        **dict(r),
+                        "labeler_identity": decode_identity(r["labeler_identity"]),
+                    }
+                    for r in regions
+                ]
                 if kind == "ranges":
                     if label is False:
                         yield (
@@ -815,7 +1021,11 @@ async def export(
                         )
                     elif any(r["violates"] for r in regions):
                         accepted = [
-                            {"start": r["start"], "end": r["end"]}
+                            {
+                                "start": r["start"],
+                                "end": r["end"],
+                                "labeler_identity": r["labeler_identity"],
+                            }
                             for r in regions
                             if r["violates"]
                         ]
@@ -842,12 +1052,73 @@ async def export(
                             + "\n"
                         )
 
+    async def examples():
+        async for record in records():
+            yield record
+        if not include_agentic:
+            return
+        async for item in training_records(
+            request,
+            key_id,
+            project,
+            rule,
+            trace_id,
+            rule_version,
+            True,
+            True,
+            agent_only=True,
+        ):
+            for field in ("questions", "ranges", "file_label", "labeler_identity"):
+                item.pop(field)
+            for agent in item.pop("agentic_labels"):
+                base = {**item, "labeler_identity": agent["labeler_identity"]}
+                if kind == "files":
+                    yield (
+                        json.dumps(
+                            {**base, "violates": agent["violates"]}, ensure_ascii=False
+                        )
+                        + "\n"
+                    )
+                elif kind == "ranges":
+                    yield (
+                        json.dumps(
+                            {**base, "ranges": agent["ranges"], "coverage": "agentic"},
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+                else:
+                    lines = source_lines(item["source"])
+                    for region in agent["ranges"]:
+                        snippet = "\n".join(lines[region["start"] - 1 : region["end"]])
+                        yield (
+                            json.dumps(
+                                {
+                                    **base,
+                                    **region,
+                                    "violates": True,
+                                    "snippet": snippet,
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        )
+
+    async def dataset():
+        async for row in training_records(
+            request,
+            key_id,
+            project,
+            rule,
+            trace_id,
+            rule_version,
+            kind == "annotated",
+            include_agentic,
+        ):
+            yield json.dumps(row, ensure_ascii=False) + "\n"
+
     return StreamingResponse(
-        training_records(
-            request, key_id, project, rule, trace_id, rule_version, kind == "annotated"
-        )
-        if kind in {"all", "annotated"}
-        else records(),
+        dataset() if kind in {"all", "annotated"} else examples(),
         media_type="application/x-ndjson",
         headers={"Content-Disposition": f'attachment; filename="nllint-{kind}.jsonl"'},
     )

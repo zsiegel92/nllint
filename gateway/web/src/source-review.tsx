@@ -1,9 +1,10 @@
+import {agentRanges} from './agentic';
 import {useEffect, useMemo, useRef, useState} from 'react';
 import type {CSSProperties, PointerEvent as ReactPointerEvent} from 'react';
 import {ArrowLeft, ArrowRight, Eye} from 'lucide-react';
 import {CodeTokens, SourceHeader} from './code';
 import type {HighlightedLine, Language} from './code';
-import {label, rangeText} from './api';
+import {attribution, label, rangeText} from './api';
 import type {Cell, Label, Range} from './api';
 import {rangeParam} from './navigation';
 
@@ -21,7 +22,8 @@ export function LabelButtons({active, save, disabled}: {
 }
 
 export function rangeStatus(range: Range) {
-  if (!range.candidate) return 'Human-added range';
+  if (range.agent) return `Agent violation · ${range.agent.name}`;
+  if (!range.candidate) return 'Reviewer-added range';
   if (range.model_decision === null) return 'Candidate · awaiting adjudication';
   return range.model_decision ? 'Adjudicated violation' : 'Adjudicated no violation';
 }
@@ -35,8 +37,8 @@ type Marker = {cell: Cell; range: Range; key: string; color: string; lane: numbe
 type Hover = {marker: Marker; line: number; above: boolean};
 
 function layout(cells: Cell[], lineCount: number) {
-  const markers = cells.flatMap((cell, index) => cell.ranges.map(range => ({
-    cell, range, color: `hsl(${(index * 137.508 + 217) % 360} 61% 42%)`,
+  const markers = cells.flatMap((cell, index) => [...cell.ranges, ...agentRanges(cell)].map(range => ({
+    cell, range, color: range.agent ? '#8554b3' : `hsl(${(index * 137.508 + 217) % 360} 61% 42%)`,
     key: `${cell.run_id}:${rangeParam(range)}`, lane: 0,
   }))).sort((a, b) => a.range.start - b.range.start || a.range.end - b.range.end || a.cell.run_id - b.cell.run_id);
   const ends: number[] = [];
@@ -62,7 +64,7 @@ function colorStyle(color: string, column?: number): CSSProperties & {'--rule-co
 function RangeControls({marker, save, busy}: {marker: Marker; save: SaveRange; busy: boolean}) {
   return <>
     <strong>{marker.cell.rule_id} · {rangeText(marker.range)}</strong>
-    <small>{rangeStatus(marker.range)}{marker.range.annotation !== null ? ` · Human: ${label(marker.range.annotation)}` : ''}</small>
+    <small>{rangeStatus(marker.range)}{marker.range.annotation !== null ? ` · ${attribution(marker.range.labeler_identity)}: ${label(marker.range.annotation)}` : ''}</small>
     <LabelButtons active={marker.range.annotation} disabled={busy}
       save={decision => save(marker.cell, marker.range, decision)}/>
   </>;
@@ -127,10 +129,12 @@ export function SourceReview({title, lines, cells, focus, onFocus, language, onL
       }}>{adding ? 'Cancel' : '+ Add range'}</button>}
     </SourceHeader>
     {save && markers.length > 0 && <div className="range-legend">
+      {markers.some(marker => marker.range.agent) && <span><i data-state="agent"/> Agent violation</span>}
+      {markers.some(marker => marker.range.annotation !== null) && <span><i data-reviewed="true"/> Reviewed range</span>}
       <span><i data-state="candidate"/> Candidate</span>
       <span><i data-state="violation"/> Adjudicated violation</span>
       <span><i data-state="clear"/> Adjudicated no violation</span>
-      {markers.some(marker => !marker.range.candidate) && <span><i data-state="human"/> Human-added</span>}
+      {markers.some(marker => !marker.range.candidate && !marker.range.agent) && <span><i data-state="human"/> Reviewer-added</span>}
     </div>}
     {focused && save && !adding && <div className="focused-annotation" style={colorStyle(focused.color)}
       onPointerDown={event => {swipe.current = {x: event.clientX, y: event.clientY};}}
@@ -197,10 +201,11 @@ export function SourceReview({title, lines, cells, focus, onFocus, language, onL
           }}>
             {overlapping.map(marker => <button key={marker.key} type="button" className="range-marker"
               style={colorStyle(marker.color, marker.lane + 1)}
-              data-state={marker.range.model_decision === null ? marker.range.candidate ? 'candidate' : 'human' : marker.range.model_decision ? 'violation' : 'clear'}
+              data-state={marker.range.agent ? 'agent' : marker.range.model_decision === null ? marker.range.candidate ? 'candidate' : 'human' : marker.range.model_decision ? 'violation' : 'clear'}
+              data-reviewed={marker.range.annotation !== null}
               data-highlighted={marker.key === emphasized?.key}
               tabIndex={line === marker.range.start && !adding ? 0 : -1}
-              aria-label={`${marker.cell.rule_id}, ${rangeText(marker.range)}, ${rangeStatus(marker.range)}${marker.range.annotation === null ? '' : `, Human: ${label(marker.range.annotation)}`}`}
+              aria-label={`${marker.cell.rule_id}, ${rangeText(marker.range)}, ${rangeStatus(marker.range)}${marker.range.annotation === null ? '' : `, ${attribution(marker.range.labeler_identity)}: ${label(marker.range.annotation)}`}`}
               onPointerEnter={event => {if (!adding && !focused) show(marker, line, event.currentTarget);}}
               onPointerLeave={hide}
               onFocus={event => {if (!adding && !focused) show(marker, line, event.currentTarget);}}

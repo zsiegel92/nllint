@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import * as vscode from "vscode";
+import { annotationPairs } from "./annotations.js";
 import type { FileResult, LintDiagnostic, Snapshot } from "./protocol.js";
 
 type FileDiagnostics = {
@@ -150,6 +151,8 @@ function toDiagnostics(
 			value: lint.ruleId,
 			target: vscode.Uri.file(path.resolve(root, lint.rulePath)),
 		};
+		if (lint.pairId !== undefined && lint.regions.length)
+			annotationPairs.set(diagnostic, lint.pairId);
 		return diagnostic;
 	});
 }

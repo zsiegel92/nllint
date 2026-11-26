@@ -3,11 +3,12 @@ import os
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Route
 
-from . import auth, lint, review
+from . import agentic, auth, headless, lint, review
 from .db import Database
 from .jobs import Worker, stop_workers
 from .providers import Providers
@@ -27,6 +28,9 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.routing = Routing(settings)
     async with AsyncExitStack() as stack:
+        mcp = headless.make_mcp()
+        app.state.mcp_app = mcp.streamable_http_app()
+        await stack.enter_async_context(mcp.session_manager.run())
         db = await Database.open(settings)
         app.state.db = db
         stack.push_async_callback(db.close)
@@ -47,12 +51,14 @@ app = FastAPI(title="NLLint Gateway", lifespan=lifespan)
 app.include_router(auth.session_router)
 app.include_router(lint.router)
 app.include_router(review.router)
+app.include_router(agentic.router)
+app.include_router(headless.router)
 
 
 @app.middleware("http")
 async def privacy(request, call_next):
     response = await call_next(request)
-    if request.url.path.startswith(("/api/", "/v1/")):
+    if request.url.path.startswith(("/api/", "/v1/", "/mcp")):
         response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
@@ -76,6 +82,7 @@ if WEB.is_dir():
     @app.get("/traces/{path:path}", include_in_schema=False)
     @app.get("/pipelines", include_in_schema=False)
     @app.get("/pipelines/{path:path}", include_in_schema=False)
+    @app.get("/agentic-labelers", include_in_schema=False)
     @app.get("/api-keys", include_in_schema=False)
     @app.get("/find-ranges/{path:path}", include_in_schema=False)
     async def index():
@@ -86,3 +93,34 @@ if WEB.is_dir():
                 "Cache-Control": "no-cache",
             },
         )
+
+
+class McpTransport:
+    async def __call__(self, scope, receive, send):
+        request = Request(scope, receive=receive)
+        # This bearer-only transport is intended for native clients.
+        if request.headers.get("origin") is not None:
+            response = JSONResponse(
+                {"detail": "Browser origins are unsupported"}, status_code=403
+            )
+            await response(scope, receive, send)
+            return
+        try:
+            await auth.client_key(request, await auth.bearer(request))
+        except HTTPException as error:
+            response = JSONResponse(
+                {"detail": error.detail},
+                status_code=error.status_code,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+        request.state.mcp_gateway = request.app
+        await request.app.state.mcp_app(scope, receive, send)
+
+
+app.router.routes.extend(
+    [
+        Route("/mcp", McpTransport(), methods=["POST", "GET", "DELETE"]),
+    ]
+)

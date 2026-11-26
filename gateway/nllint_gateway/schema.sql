@@ -209,6 +209,31 @@ CREATE TABLE IF NOT EXISTS range_annotations (
     FOREIGN KEY (user_id,pair_id) REFERENCES file_rules(user_id,id)
 );
 
+ALTER TABLE file_rules ADD COLUMN IF NOT EXISTS labeler_identity jsonb;
+ALTER TABLE range_annotations ADD COLUMN IF NOT EXISTS labeler_identity jsonb;
+
+CREATE TABLE IF NOT EXISTS agentic_labelers (
+    user_id bigint NOT NULL DEFAULT nllint_user_id() REFERENCES users(id),
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name text NOT NULL,
+    model text NOT NULL,
+    max_tool_calls integer NOT NULL CHECK (max_tool_calls BETWEEN 0 AND 12),
+    UNIQUE (user_id,id),
+    UNIQUE (user_id,name)
+);
+
+CREATE TABLE IF NOT EXISTS agentic_labels (
+    user_id bigint NOT NULL DEFAULT nllint_user_id() REFERENCES users(id),
+    run_id bigint NOT NULL,
+    labeler_id bigint NOT NULL,
+    ranges jsonb NOT NULL,
+    labeler_identity jsonb NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id,labeler_id),
+    FOREIGN KEY (user_id,run_id) REFERENCES runs(user_id,id),
+    FOREIGN KEY (user_id,labeler_id) REFERENCES agentic_labelers(user_id,id)
+);
+
 -- These tables contain control-plane indexes only and are readable through the functions below.
 CREATE TABLE IF NOT EXISTS api_key_directory (
     digest text PRIMARY KEY,
@@ -287,7 +312,7 @@ BEGIN
     FOREACH relation IN ARRAY ARRAY[
         'projects','api_keys','streams','texts','file_rules','traces','provider_versions',
         'runs','trace_runs','questions','range_candidates','range_annotations',
-        'provider_requests','provider_request_results'
+        'provider_requests','provider_request_results','agentic_labelers','agentic_labels'
     ] LOOP
         EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', relation);
         EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', relation);
@@ -299,6 +324,7 @@ BEGIN
         EXECUTE format('GRANT SELECT, INSERT, UPDATE ON public.%I TO nllint_runtime', relation);
     END LOOP;
 END $$;
+GRANT USAGE ON SEQUENCE agentic_labelers_id_seq TO nllint_runtime;
 GRANT DELETE ON range_annotations TO nllint_runtime;
 GRANT USAGE ON SEQUENCE projects_id_seq, api_keys_id_seq, file_rules_id_seq,
     provider_versions_id_seq, runs_id_seq, provider_requests_id_seq TO nllint_runtime;

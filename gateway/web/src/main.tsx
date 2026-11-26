@@ -1,4 +1,6 @@
-import {useCallback, useEffect, useMemo, useState} from 'react';
+import {LabelerSettings} from './agentic';
+import type {Labeler} from './api';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import type {FormEvent} from 'react';
 import {createRoot} from 'react-dom/client';
 import {useQueryStates} from 'nuqs';
@@ -70,7 +72,7 @@ function App() {
   </section></main>;
   if (matched.route.id === 'home') return <LegacyHome api={api}/>;
   if (matched.route.id === 'find') return <FindRanges api={api} run={matched.params.runId ?? ''}/>;
-  const section: Section = matched.route.id === 'keys' ? 'keys'
+  const section: Section = matched.route.id === 'labelers' ? 'labelers' : matched.route.id === 'keys' ? 'keys'
     : matched.route.id === 'projects' || matched.route.id === 'models' ? 'projects' : 'traces';
   return <Workspace api={api} section={section} project={matched.params.projectId ?? ''}
     traceId={matched.params.traceId} models={matched.params.pipelineId} logout={() => {
@@ -205,12 +207,20 @@ function Workspace({api, logout, section, project, traceId, models}: {
   const {mode, stages, issue, key, rule, rules, sort, exportKind} = query;
   const page = Math.max(0, query.page);
   const selectedTrace = query.reviewTrace ?? (query.run ? traceId : undefined);
+  const [labelers, setLabelers] = useState<Labeler[]>([]);
+  const agentBatch = useRef<{stop: boolean} | null>(null);
+  const [agentProgress, setAgentProgress] = useState<{done: number; total: number; stopping: boolean}>();
+  const [agentSummary, setAgentSummary] = useState('');
+  useEffect(() => () => {
+    if (agentBatch.current) agentBatch.current.stop = true;
+    agentBatch.current = null;
+  }, []);
   const [keys, setKeys] = useState<Key[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [filteredProjects, setFilteredProjects] = useState<Project[]>([]);
   const routingProject = projects.find(item => String(item.id) === models);
   const [projectName, setProjectName] = useState('');
-  const [data, setData] = useState<{traces: Trace[]; more: boolean}>();
+  const [tracePage, setTracePage] = useState<{path: string; traces: Trace[]; more: boolean}>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [reload, setReload] = useState(0);
@@ -220,8 +230,8 @@ function Workspace({api, logout, section, project, traceId, models}: {
 
   useEffect(() => {
     let mounted = true;
-    Promise.all([api.json<Key[]>('/keys'), api.json<Project[]>('/projects')])
-      .then(([keys, projects]) => {if (mounted) {setKeys(keys); setProjects(projects);}})
+    Promise.all([api.json<Key[]>('/keys'), api.json<Project[]>('/projects'), api.json<Labeler[]>('/agentic-labelers')])
+      .then(([keys, projects, labelers]) => {if (mounted) {setKeys(keys); setProjects(projects); setLabelers(labelers);}})
       .catch(error => {if (mounted) setError(error.message);});
     return () => {mounted = false;};
   }, [api, reload]);
@@ -247,20 +257,22 @@ function Workspace({api, logout, section, project, traceId, models}: {
   if (project) ruleScope.set('project', project);
   if (key) ruleScope.set('key_id', key);
   if (traceId) ruleScope.set('trace_id', traceId);
+  const traceParams = new URLSearchParams(scope);
+  traceParams.set('issue', issue);
+  traceParams.set('sort', sort);
+  traceParams.set('limit', String(pageSize));
+  traceParams.set('offset', String(page * pageSize));
+  if (traceId) traceParams.set('trace_id', traceId);
+  const traceRequest = `/traces?${traceParams}`;
+  const data = tracePage?.path === traceRequest ? tracePage : undefined;
   useEffect(() => {
     if (section !== 'traces') return;
     let mounted = true;
     let timer: number;
-    const params = new URLSearchParams(scope);
-    params.set('issue', issue);
-    params.set('sort', sort);
-    params.set('limit', String(pageSize));
-    params.set('offset', String(page * pageSize));
-    if (traceId) params.set('trace_id', traceId);
     function fetchData() {
-      api.json<{traces: Trace[]; more: boolean}>(`/traces?${params}`).then(next => {
+      api.json<{traces: Trace[]; more: boolean}>(traceRequest).then(next => {
         if (!mounted) return;
-        setData(next);
+        setTracePage({...next, path: traceRequest});
         if (next.traces.some(trace => trace.cells.some(cell => !['ready', 'failed'].includes(cell.stage)))) {
           timer = window.setTimeout(fetchData, 2200);
         }
@@ -268,7 +280,7 @@ function Workspace({api, logout, section, project, traceId, models}: {
     }
     fetchData();
     return () => {mounted = false; clearTimeout(timer);};
-  }, [api, issue, page, reload, scope, section, sort, traceId]);
+  }, [api, reload, section, traceRequest]);
 
   function changeMode(next: ReviewMode) {
     void setQuery({mode: next});
@@ -304,6 +316,7 @@ function Workspace({api, logout, section, project, traceId, models}: {
     try {
       const params = new URLSearchParams(scope);
       if (traceId) params.set('trace_id', traceId);
+      if (query.includeAgentic) params.set('include_agentic', 'true');
       const link = document.createElement('a');
       const path = `/export/${exportKind}?${params}`;
       if (exportKind === 'all' || exportKind === 'annotated') {
@@ -333,6 +346,41 @@ function Workspace({api, logout, section, project, traceId, models}: {
     return () => {active = false;};
   }, [api, reload, rule, section, selectedTrace, visibleTrace]);
 
+  const selectedLabeler = labelers.find(item => item.id === query.agent) ?? labelers[0];
+  const matchingRuns = [...new Set(traces.flatMap(trace =>
+    trace.matching_run_ids.filter(id => trace.cells.some(cell => cell.run_id === id))))];
+  async function runAgent(ids: number[]) {
+    if (!selectedLabeler || agentBatch.current || !ids.length) return;
+    const batch = {stop: false};
+    agentBatch.current = batch;
+    const failures: string[] = [];
+    setError('');
+    setAgentSummary('');
+    setAgentProgress({done: 0, total: ids.length, stopping: false});
+    let done = 0;
+    for (const id of ids) {
+      if (batch.stop) break;
+      try {
+        await api.json(`/runs/${id}/agentic-label`, 'POST', {labeler_id: selectedLabeler.id});
+        if (agentBatch.current === batch) refresh();
+      } catch (error) {
+        failures.push(`Run ${id} · ${(error as Error).message}`);
+      }
+      if (agentBatch.current !== batch) return;
+      done++;
+      setAgentProgress({done, total: ids.length, stopping: batch.stop});
+    }
+    agentBatch.current = null;
+    setAgentProgress(undefined);
+    const remaining = ids.length - done;
+    setAgentSummary(`Labeled ${done - failures.length} of ${ids.length}${failures.length ? ` · ${failures.length} failed` : ''}${remaining ? ` · ${remaining} skipped` : ''}`);
+    if (failures.length) setError(failures.join(' | '));
+  }
+
+  function stopAgentBatch() {
+    if (agentBatch.current) agentBatch.current.stop = true;
+    setAgentProgress(progress => progress && {...progress, stopping: true});
+  }
   const active = visibleTrace && !rule ? visibleTrace : fallbackTrace?.id === selectedTrace ? fallbackTrace : undefined;
   const current = active?.cells.find(cell => cell.run_id === query.run);
   const language = query.syntax && isLanguage(query.syntax) ? query.syntax : undefined;
@@ -349,6 +397,7 @@ function Workspace({api, logout, section, project, traceId, models}: {
       <nav aria-label="Workspace">
         <Link to="/traces" aria-current={section === 'traces' ? 'page' : undefined}>Traces</Link>
         <Link to="/pipelines" aria-current={section === 'projects' ? 'page' : undefined}>Pipelines</Link>
+        <Link to="/agentic-labelers" aria-current={section === 'labelers' ? 'page' : undefined}>Agentic labelers</Link>
         <Link to="/api-keys" aria-current={section === 'keys' ? 'page' : undefined}>API keys</Link>
       </nav>
       <button className="quiet" type="button" onClick={logout}>Sign out</button>
@@ -371,13 +420,24 @@ function Workspace({api, logout, section, project, traceId, models}: {
                 <option value="annotated">All annotated data</option>
                 <option value="all">All lint data</option>
               </select>
+              <label><input type="checkbox" checked={Boolean(query.includeAgentic)}
+                onChange={event => void setQuery({includeAgentic: Number(event.target.checked)})}/>Include agentic labels</label>
               <button type="button" onClick={download}>Export JSONL</button>
             </div>
           </div>
           {traceId && <Link to={gatewayQuery(tracePath(project), {...query, ...closedReview, page: null})}>← Project traces</Link>}
           <div className="filters">
-            <label>Find<select value={issue} onChange={event => void setQuery({issue: event.target.value, page: null})}>
+            <label>Find<select value={issue} onChange={event => {
+              const next = event.target.value;
+              void setQuery({issue: next, page: null, sort: next === 'agent-disagreements' ? 'confidence-desc'
+                : next === 'low-confidence' ? 'confidence-asc' : 'relevance'});
+            }}>
               {Object.entries(issueLabels).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
+            </select></label>
+            <label>Sort<select value={sort} onChange={event => void setQuery({sort: event.target.value as typeof sort, page: null})}>
+              <option value="relevance">Relevance</option><option value="newest">Newest</option>
+              <option value="confidence-asc">Lowest pipeline confidence</option>
+              <option value="confidence-desc">Highest pipeline confidence</option><option value="path">File path</option>
             </select></label>
             <label>Project<select value={project} onChange={event => void navigate(gatewayQuery(tracePath(event.target.value), {...query, ...closedReview, rules: null, rule: null, page: null}))}>
               <option value="">All projects</option>{projects.map(item => <option key={item.id} value={item.name}>{item.name}</option>)}
@@ -393,7 +453,23 @@ function Workspace({api, logout, section, project, traceId, models}: {
             <TableStages selected={stages} onChange={stages => void setQuery({stages})}/>
             <button className="quiet" type="button" onClick={refresh}>Refresh</button>
           </div>
-          {data ? <Matrix traces={traces} stages={stages} open={open}
+          <div className="matrix-bar agent-controls">
+            {selectedLabeler ? <>
+              <label>Agentic labeler <select value={selectedLabeler.id} disabled={Boolean(agentProgress)}
+                onChange={event => void setQuery({agent: Number(event.target.value)})}>
+                {labelers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select></label>
+              <button type="button" disabled={Boolean(agentProgress) || !matchingRuns.length}
+                onClick={() => void runAgent(matchingRuns)}>Label {matchingRuns.length} matching {matchingRuns.length === 1 ? 'run' : 'runs'} on this page</button>
+              {agentProgress && <>
+                <span role="status">{agentProgress.stopping ? 'Finishing current run' : 'Labeling'} · {agentProgress.done} of {agentProgress.total}</span>
+                {agentProgress.total - agentProgress.done > 1 && <button type="button" className="quiet"
+                  disabled={agentProgress.stopping} onClick={stopAgentBatch}>Stop after current run</button>}
+              </>}
+              {agentSummary && <span role="status">{agentSummary}</span>}
+            </> : <Link to="/agentic-labelers">Configure an agentic labeler</Link>}
+          </div>
+          {data ? <Matrix runAgent={selectedLabeler ? ids => void runAgent(ids) : undefined} agentBusy={Boolean(agentProgress)} traces={traces} stages={stages} open={open}
             languages={selectedTrace && language ? {[selectedTrace]: language} : {}}
             openFile={trace => open(trace, undefined, 'files')}
             traceLink={trace => gatewayQuery(tracePath(trace.project, trace.id), {...query, ...closedReview, page: null})}
@@ -407,6 +483,7 @@ function Workspace({api, logout, section, project, traceId, models}: {
             <button type="button" disabled={!data.more} onClick={() => void setQuery({page: page + 1})}>Next →</button>
           </div>}
         </>}
+        {section === 'labelers' && <LabelerSettings api={api} items={labelers} refresh={refresh} onError={setError}/>}
         {section === 'keys' && <Keys api={api} keys={keys} refresh={refresh} onError={setError}/>}
         {section === 'projects' && <>
           <h1>Pipelines</h1>

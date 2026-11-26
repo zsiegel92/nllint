@@ -11,7 +11,7 @@ OperatorLabel = Annotated[str, Field(min_length=1, max_length=120)]
 class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    @field_validator("*", mode="before")
+    @field_validator("*")
     @classmethod
     def reject_null_bytes(cls, value):
         if isinstance(value, str) and "\x00" in value:
@@ -91,13 +91,42 @@ class NumberedRanges(Strict):
         return ranges
 
 
-class FileAnnotation(Strict):
+class HumanIdentity(Strict):
+    type: Literal["HUMAN"]
+    user_id: int | None = None
+
+
+class BotIdentity(Strict):
+    type: Literal["BOT"]
+    model: str | None = Field(default=None, max_length=200)
+    harness_version: str | None = Field(default=None, max_length=120)
+    name: str | None = Field(default=None, max_length=120)
+
+
+class Attribution(Strict):
+    labeler_type: Literal["HUMAN", "BOT"] | None = None
+    labeler_identity: (
+        Annotated[HumanIdentity | BotIdentity, Field(discriminator="type")] | None
+    ) = None
+
+    @model_validator(mode="after")
+    def matching_identity(self):
+        if (
+            self.labeler_type
+            and self.labeler_identity
+            and self.labeler_type != self.labeler_identity.type
+        ):
+            raise ValueError("Labeler type and identity must agree")
+        return self
+
+
+class FileAnnotation(Attribution):
     decision: bool | None
     reject_all: bool = False
     run_id: int | None = Field(default=None, ge=1)
 
 
-class RangeAnnotation(LineRange):
+class RangeAnnotation(LineRange, Attribution):
     decision: bool | None
 
 

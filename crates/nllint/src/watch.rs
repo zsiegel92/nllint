@@ -464,6 +464,8 @@ enum Status {
 struct Diagnostic {
     path: PathBuf,
     rule_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pair_id: Option<i64>,
     rule_path: PathBuf,
     message: String,
     severity: Severity,
@@ -582,6 +584,7 @@ impl From<Violation> for Diagnostic {
         Self {
             path: value.path,
             rule_id: value.rule_id,
+            pair_id: value.pair_id,
             rule_path: value.rule_path,
             message: value.message,
             severity: value.severity,
@@ -650,6 +653,7 @@ mod tests {
                 path: "src/a.ts".into(),
                 rule_id: "rule".into(),
                 rule_path: ".nllint-rules/rule.md".into(),
+                pair_id: None,
                 message: "Rule".into(),
                 confidence: 0.9,
                 severity: Severity::Error,
@@ -721,6 +725,7 @@ mod tests {
             path: PathBuf::from(path),
             rule_id: "rule".into(),
             rule_path: ".nllint-rules/rule.md".into(),
+            pair_id: None,
             message: "Rule message".into(),
             confidence: 0.9,
             severity: Severity::Error,

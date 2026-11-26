@@ -1,3 +1,4 @@
+import {AgentResults} from './agentic';
 import {useEffect, useMemo, useState} from 'react';
 import * as ToggleGroup from '@radix-ui/react-toggle-group';
 import {Eye, Pencil} from 'lucide-react';
@@ -8,7 +9,7 @@ import {findRangesPath, rangeParam} from './navigation';
 import {ReviewStages} from './stage-selector';
 import {LabelButtons, RangeLink, rangeStatus, SourceReview} from './source-review';
 import type {SaveRange} from './source-review';
-import {Api, label, probability} from './api';
+import {Api, attribution, label, probability} from './api';
 import type {Cell, History, Label, Mode, ProviderHistory, Range, ReviewMode, Run, Trace} from './api';
 
 function Verdict({decision, confidence}: {decision: Label; confidence?: number | null}) {
@@ -58,15 +59,16 @@ function RangeStageCard({trace, cell, adjudicated, open, language}: {
     {ranges.map(range => <div className="stage-range" key={rangeParam(range)}>
       <RangeLink range={range} cell={cell} onClick={() => open(trace, cell, 'ranges', range)}/>
       <small>{adjudicated || !range.candidate ? rangeStatus(range) : 'Candidate range'}
-        {(adjudicated || !range.candidate) && range.annotation !== null ? ` · Human: ${label(range.annotation)}` : ''}</small>
+        {(adjudicated || !range.candidate) && range.annotation !== null ? ` · ${attribution(range.labeler_identity)}: ${label(range.annotation)}` : ''}</small>
       {adjudicated && range.preview && <CodeBlock source={range.preview} language={language}/>}
     </div>)}
   </section>;
 }
 
-export function Matrix({traces, stages, open, openFile, onRule, languages, traceLink, selectedRules}: {
+export function Matrix({traces, stages, open, openFile, onRule, languages, traceLink, selectedRules, runAgent, agentBusy}: {
   traces: Trace[]; stages: Mode[]; open: OpenReview; openFile: (trace: Trace) => void;
   languages: Partial<Record<string, Language>>; traceLink: (trace: Trace) => string;
+  runAgent?: (ids: number[]) => void; agentBusy: boolean;
   onRule: (version: string) => void; selectedRules: string[];
 }) {
   if (!traces.length) return <div className="empty">No traces match these filters.</div>;
@@ -86,6 +88,7 @@ export function Matrix({traces, stages, open, openFile, onRule, languages, trace
         <Link className="file-name" to={traceLink(trace)}>{trace.file_path}</Link>
         <button type="button" className="text-button" aria-label={`View file ${trace.file_path}`}
           onClick={() => openFile(trace)}>View file</button>
+        {runAgent && <button type="button" disabled={agentBusy} onClick={() => runAgent([...new Set(trace.cells.map(cell => cell.run_id))])}>Label all file rules</button>}
         <small>{trace.project} · {trace.key_name}</small>
         <small>Score {trace.score} · {new Date(trace.created_at).toLocaleString()}</small>
       </th>
@@ -95,14 +98,16 @@ export function Matrix({traces, stages, open, openFile, onRule, languages, trace
         const language = languages[trace.id] ?? languageForPath(trace.file_path);
         return <td key={column.rule_version}>
           {stages.includes('files') && <section className="stage-card">
-            <div className="stage-card-heading"><strong>File</strong>
+            <div className="stage-card-heading"><strong>Pipeline · File</strong>
               <button type="button" className="icon-action" aria-label={`Review file decision for ${cell.rule_id}`}
                 onClick={() => open(trace, cell, 'files')}><Pencil size={14} aria-hidden="true"/></button></div>
             <FileVerdict cell={cell}/>
-            {cell.file_label !== null && <small>Human: {label(cell.file_label)}</small>}
+            {cell.file_label !== null && <small>{attribution(cell.labeler_identity)} · {label(cell.file_label)}</small>}
           </section>}
           {stages.includes('ranges') && <RangeStageCard trace={trace} cell={cell} language={language} open={open}/>}
           {stages.includes('adjudication') && <RangeStageCard trace={trace} cell={cell} language={language} open={open} adjudicated/>}
+          <AgentResults cell={cell} open={range => open(trace, cell, 'ranges', range)}/>
+          {runAgent && <button type="button" disabled={agentBusy} onClick={() => runAgent([cell.run_id])}>Label this rule</button>}
         </td>;
       })}
     </tr>)}</tbody>
@@ -186,7 +191,8 @@ function RuleCard({api, trace, cell, focused, canAnnotate, saveFile, busy, refre
     <div className="review-rule-header">
       <div className="review-rule-summary">
         <span className="review-rule-name"><strong>{cell.rule_id}</strong><small>{cell.rule_path}</small></span>
-        <FileVerdict cell={cell}/>
+        <span>Pipeline <FileVerdict cell={cell}/></span>
+        {cell.file_label !== null && <small>{attribution(cell.labeler_identity)} · {label(cell.file_label)}</small>}
         {canAnnotate && <LabelButtons active={cell.file_label} disabled={busy} save={decision => saveFile(cell, decision)}/>}
       </div>
       <ToggleGroup.Root className="rule-detail-pills" type="single" value={tab}
@@ -196,6 +202,7 @@ function RuleCard({api, trace, cell, focused, canAnnotate, saveFile, busy, refre
       </ToggleGroup.Root>
     </div>
     {canAnnotate && <FileFollowup cell={cell} save={saveFile} busy={busy}/>}
+    <AgentResults cell={cell}/>
     {tab && <RuleDetails key={tab} api={api} trace={trace} cell={cell} tab={tab} refresh={refresh}/>}
   </section>;
 }
@@ -235,7 +242,7 @@ export function ReviewPanel({api, trace, cell, mode, close, refresh, saveFile, s
       cells={mode === 'ranges' ? cells : []} language={language} onLanguage={onLanguage}
       focus={mode === 'ranges' && cell ? selectedRange ?? undefined : undefined}
       onFocus={cell && mode === 'ranges' ? onRange : undefined} save={mode === 'ranges' ? saveRange : undefined} busy={busy}/>}
-    {mode === 'ranges' && cells.every(item => !item.ranges.length) &&
+    {mode === 'ranges' && cells.every(item => !item.ranges.length && !item.agentic_labels.some(agent => agent.ranges.length)) &&
       <p className="muted">{cells.some(item => item.stage !== 'ready' && item.stage !== 'failed') ? 'Ranges are still processing.' : 'No ranges recorded.'}</p>}
     {cells.map(item => <RuleCard key={item.run_id} api={api} trace={trace} cell={item} focused={Boolean(cell && mode === 'files')}
       canAnnotate={mode === 'files'} saveFile={saveFile} busy={busy} refresh={refresh}/>)}

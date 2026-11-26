@@ -1,6 +1,6 @@
 import {createSerializer, parseAsArrayOf, parseAsInteger, parseAsString, parseAsStringLiteral} from 'nuqs';
 
-export const sectionPaths = {traces: '/traces', projects: '/pipelines', keys: '/api-keys'} as const;
+export const sectionPaths = {traces: '/traces', projects: '/pipelines', keys: '/api-keys', labelers: '/agentic-labelers'} as const;
 export type Section = keyof typeof sectionPaths;
 
 export const routes = [
@@ -10,6 +10,7 @@ export const routes = [
   {id: 'trace', path: '/traces/:projectId/:traceId'},
   {id: 'projects', path: '/pipelines'},
   {id: 'models', path: '/pipelines/:pipelineId/models'},
+  {id: 'labelers', path: '/agentic-labelers'},
   {id: 'keys', path: '/api-keys'},
   {id: 'find', path: '/find-ranges/:runId'},
 ] as const;
@@ -31,9 +32,11 @@ export const issueLabels = {
   'adjudicated-positives': 'Adjudicated Positives',
   'no-ranges': 'Positive file, no ranges',
   'all-rejected': 'Positive file, all ranges rejected',
-  disagreements: 'Human and model disagree',
+  disagreements: 'Reviewer and pipeline disagree',
   'rejected-candidates': 'Rejected candidates',
   unreviewed: 'Unreviewed decisions',
+  'low-confidence': 'Low pipeline confidence',
+  'agent-disagreements': 'Agent and pipeline disagree',
   failed: 'Processing failed',
 };
 
@@ -44,7 +47,9 @@ export const navigation = {
   key: parseAsString.withDefault(''),
   rule: parseAsString.withDefault(''),
   rules: parseAsArrayOf(parseAsString).withDefault([]),
-  sort: parseAsStringLiteral(['relevance', 'newest']).withDefault('relevance'),
+  sort: parseAsStringLiteral(['relevance', 'newest', 'confidence-asc', 'confidence-desc', 'path']).withDefault('relevance'),
+  agent: parseAsInteger,
+  includeAgentic: parseAsInteger.withDefault(0),
   page: parseAsInteger.withDefault(0),
   exportKind: parseAsStringLiteral(exportKinds).withDefault('adjudication'),
   run: parseAsInteger,
@@ -59,4 +64,4 @@ export const closedReview = {
   run: null, reviewTrace: null, range: null, syntax: null,
 } as const;
 
-export const rangeParam = (range: {start: number; end: number}) => `${range.start}-${range.end}`;
+export const rangeParam = (range: {start: number; end: number; agent?: {id: number}}) => `${range.start}-${range.end}${range.agent ? `-agent-${range.agent.id}` : ''}`;
