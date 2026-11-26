@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers
 from starlette.routing import Route
 
-from . import agentic, auth, evaluation, headless, lint, review
+from . import agentic, auth, evaluation, headless, lint, mcp_server, review
 from .db import Database
 from .jobs import Worker, stop_workers
 from .providers import Providers
@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
         app.state.review_services = review.ReviewServices(
             db, settings, app.state.routing, app.state.providers
         )
-        mcp = headless.make_mcp(app.state.review_services)
+        mcp = mcp_server.make_mcp(app.state.review_services)
         app.state.mcp_app = mcp.streamable_http_app()
         await stack.enter_async_context(mcp.session_manager.run())
         if settings.nllint_worker_enabled:
@@ -53,7 +53,16 @@ async def lifespan(app: FastAPI):
         yield
 
 
-app = FastAPI(title="NLLint Gateway", lifespan=lifespan)
+app = FastAPI(
+    title="NLLint Gateway API",
+    description=(
+        "Use `/v1` routes with a gateway API key as a bearer token. Lint and editor "
+        "operations are scoped to that key. Review routes can access the owning account’s "
+        "traces across projects and keys. Routes under `/api` serve the signed-in web app. "
+        "MCP clients connect to `/mcp` over Streamable HTTP with the same bearer token."
+    ),
+    lifespan=lifespan,
+)
 app.include_router(auth.session_router)
 app.include_router(lint.router)
 app.include_router(review.router)

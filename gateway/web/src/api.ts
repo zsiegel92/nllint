@@ -1,12 +1,22 @@
 export type Identity = {type: 'HUMAN' | 'BOT'; origin: string; invoked_via?: string; configured_via?: string; harness_version?: string; name?: string; model?: string; user_id?: number};
 export type Labeler = {id: number; name: string; model: string; max_tool_calls: number; instructions: string; configured_via: string | null};
 export type AgentLabel = {labeler_id: number; violates: boolean; labeler_identity: Identity; ranges: {start: number; end: number}[]};
-export const attribution = (identity: Identity | null, showChannel = false) => identity?.type === 'BOT'
-  ? `${identity.origin === 'mcp' ? 'MCP bot' : identity.origin === 'api' ? 'API bot' : 'Bot'}${identity.name || identity.model ? ` · ${identity.name || identity.model}` : ''}`
-  : identity?.type === 'HUMAN' && !showChannel ? 'Human'
-  : identity?.origin === 'webapp' ? 'Human · browser'
-  : identity?.origin === 'ide' ? 'Human · IDE'
-  : identity?.type === 'HUMAN' ? 'Human · API' : 'Legacy annotation';
+export const annotationSources = {
+  human: 'Any human', webapp: 'Browser', ide: 'IDE', mcp: 'MCP', api: 'REST API', legacy: 'Legacy',
+} as const;
+
+export function sourceName(origin: string | null) {
+  if (origin === null) return annotationSources.legacy;
+  return annotationSources[origin as keyof typeof annotationSources] ?? origin;
+}
+
+export function attribution(identity: Identity | null, showChannel = false) {
+  if (!identity) return 'Legacy annotation';
+  if (identity.type === 'HUMAN') return showChannel ? `Human · ${sourceName(identity.origin)}` : 'Human';
+  const author = identity.origin === 'mcp' ? 'MCP bot' : identity.origin === 'api' ? 'API bot' : 'Bot';
+  const name = identity.name || identity.model;
+  return name ? `${author} · ${name}` : author;
+}
 export type Label = boolean | null;
 export type Mode = 'files' | 'adjudication' | 'ranges';
 export type ReviewMode = 'files' | 'ranges';

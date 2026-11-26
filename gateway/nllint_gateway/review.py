@@ -1108,7 +1108,11 @@ class TraceSelection(Strict):
 
 
 class SelectedExport(Strict):
-    selection: list[TraceSelection] = Field(min_length=1, max_length=250)
+    selection: list[TraceSelection] = Field(
+        min_length=1,
+        max_length=250,
+        description="Exact trace and run pairs to download.",
+    )
     include_agentic: bool = False
     include_history: bool = False
     include_review: bool = True

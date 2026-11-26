@@ -26,7 +26,9 @@ class Labeler(Strict):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)
     ]
     model: str = Field(min_length=1, max_length=200, pattern=r"^[\w./:+-]+$")
-    max_tool_calls: int = Field(default=4, ge=0, le=12)
+    max_tool_calls: int = Field(
+        default=4, ge=0, le=12, description="Maximum context lookups for one run."
+    )
     instructions: str = Field(default="", max_length=8000)
 
 

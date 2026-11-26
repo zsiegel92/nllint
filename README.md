@@ -1,6 +1,6 @@
 # NLLint
 
-NLLint applies Markdown lint rules to a project's source code. The Rust CLI and VS Code extension share project settings and a file–rule cache. The FastAPI gateway runs the decision pipeline and serves a Vite control plane for review.
+NLLint applies Markdown lint rules to a project's source code. The Rust CLI and VS Code extension share project settings and a file–rule cache. The FastAPI gateway runs the lint pipeline and serves a web app for review.
 
 ## Start the gateway
 
@@ -59,14 +59,16 @@ Repeat `--file` to check selected project-relative files. Project selectors and 
 
 Build and install the [VS Code extension](ide-extension/README.md) with `make ide-install`. Install the [NLLint skill](skills/nllint/SKILL.md) with `./install-skill.sh`.
 
-## Review and export
+## Review results and tune rules
 
-- **File decisions** shows file-level model decisions and labels. After changing a model-negative file to **Violates**, range identification starts after a 60-second debounce. **Find and annotate ranges** moves the same queued job up and opens its trace when ready. For a model-positive file labeled **No violation**, you can also label all candidate snippets negative.
-- **Adjudication** shows model results alongside editable human labels. Use the snippet controls, arrow keys, or swipe gestures to move between snippets. **Ranges** shows the numbered source and highlights candidate ranges. Use **Add range** and drag in the gutter to label a range the models did not propose.
-- Filters surface positive file decisions with no candidate ranges, positive files with all snippets rejected, human–model disagreements, and rejected snippets. The **Pipelines** view groups rules by project, supports API-key filtering, and lets you configure the providers for each project. Rule history follows the relative rule path, and a project can reference a parent's rule history.
-- JSONL exports include human-reviewed file decisions, snippet adjudication, and range examples. The range export marks confirmed negative files as `file-negative` and lists positive labeled ranges as `reviewed-positives`. Check coverage before treating the latter as exhaustive.
+Open **Traces** to review recorded lint requests. Each row is a file snapshot, and each rule cell is a run. The pipeline first checks the file, then suggests candidate ranges and checks each candidate. Use **Find** to look for missed ranges, rejected candidates, or disagreements.
 
-See [the gateway design](docs/gateway.md) for cache identity, queue behavior, and API routes.
+- Open **File decisions** to mark whether the file violates the rule. If the pipeline missed a violation, **Find and annotate ranges** starts range processing immediately. Otherwise it starts after the configured delay.
+- Open **Ranges** to review a span in the file. Use **Add range** and drag in the gutter to annotate lines the pipeline missed. The CLI and VS Code pick up annotations on their next sync.
+- Run an **Agent labeler** for a second opinion. Compare its saved result with the pipeline or an annotation. Save a file or range annotation to apply a correction to diagnostics.
+- Use **Export trace data** to download by project, API key, rule, or trace. In **Selected runs**, add matching cells across pages and download those records, or save an evaluation set with fixed expected answers. To compare rule revisions, rerun lint on the same files and open **Evaluation sets**.
+
+Use **Projects** to configure the models that process future lint requests or to include rule history from another project. See the [REST and MCP guide](docs/api.md) for integrations and the [gateway design](docs/gateway.md) for pipeline and cache behavior.
 
 ## Development
 
@@ -88,8 +90,6 @@ Vite defaults to [localhost:5175](http://localhost:5175) and FastAPI defaults to
 - `make db-migrate` applies the schema using `DATABASE_MIGRATION_URL`. `make db-check` verifies the runtime connection from `DATABASE_URL`.
 - `make cli-build` and `make cli-release` compile the Rust CLI. `make cli-install` installs it. Use `make cli-run ARGS="--dry-run"` or `make cli-watch ARGS="--stream"` to pass flags through.
 - `make test` runs Rust, gateway, and extension tests. Set `NLLINT_TEST_DATABASE_URL` in your shell to include Postgres integration tests against a disposable database with the gateway schema. Use `make check` for Rust and Python static checks.
-
-The gateway exposes its bearer-authenticated Streamable HTTP MCP server at `/mcp` and a declarative REST search at `POST /v1/traces/search`. See the [NLLint skill](skills/nllint/SKILL.md) for client setup, query examples, in-band annotations, and false-positive calibration. Freeze labeled traces in evaluation sets and compare rule revisions on identical source using MCP or the control plane. Apply the database migration before using annotation attribution, agentic labelers, or evaluation sets.
 
 Regenerate config schemas after changing the Rust settings types:
 

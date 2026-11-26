@@ -1,4 +1,4 @@
-"""Freeze labeled examples and score pipeline revisions on unchanged source."""
+"""Save expected answers and score rule revisions on the same source."""
 
 import json
 from collections import Counter
@@ -17,11 +17,23 @@ router = APIRouter(prefix="/api", dependencies=[Depends(operator)])
 
 
 class Reference(Strict):
-    run_id: int = Field(ge=1)
-    labeler_id: int | None = Field(default=None, ge=1)
-    annotation_event_id: int | None = Field(default=None, ge=1)
-    violates: bool | None = None
-    ranges: list[LineRange] | None = Field(default=None, max_length=200)
+    run_id: int = Field(ge=1, description="Run from the baseline rule revision.")
+    labeler_id: int | None = Field(
+        default=None, ge=1, description="Use this labeler’s saved result for the run."
+    )
+    annotation_event_id: int | None = Field(
+        default=None,
+        ge=1,
+        description="Use a past file annotation from this run’s pair.",
+    )
+    violates: bool | None = Field(
+        default=None, description="Explicit expected file verdict."
+    )
+    ranges: list[LineRange] | None = Field(
+        default=None,
+        max_length=200,
+        description="Complete expected range list. Use an empty list for a confirmed negative.",
+    )
 
     @model_validator(mode="after")
     def consistent(self):
@@ -52,7 +64,12 @@ class Evaluation(Strict):
     rule_version: str = Field(pattern=r"^[0-9a-f]{64}$")
     routing_version: str | None = None
     prompt_hash: str | None = None
-    threshold: float = Field(default=0.8, ge=0, le=1)
+    threshold: float = Field(
+        default=0.8,
+        ge=0,
+        le=1,
+        description="Minimum confidence for a pipeline range to count as a finding.",
+    )
     examples: Literal["errors", "all", "none"] = "errors"
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=20, ge=1, le=100)

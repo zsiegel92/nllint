@@ -113,32 +113,77 @@ ReviewerOrigin = Literal["human", "webapp", "ide", "api", "mcp", "legacy"]
 
 
 class TraceSearch(Strict):
-    key_id: int | None = None
-    project: str | None = None
-    trace_id: str | None = None
-    rule: str | None = None
-    rule_version: list[str] = Field(default_factory=list, max_length=100)
-    positive_rule_versions_only: bool = False
+    key_id: int | None = Field(
+        default=None, description="API key ID that submitted the trace."
+    )
+    project: str | None = Field(default=None, description="Exact client project ID.")
+    trace_id: str | None = Field(default=None, description="Exact trace ID.")
+    rule: str | None = Field(
+        default=None, description="Exact project-relative Markdown rule path."
+    )
+    rule_version: list[str] = Field(
+        default_factory=list,
+        max_length=100,
+        description="Match any of these rule version IDs.",
+    )
+    positive_rule_versions_only: bool = Field(
+        default=False,
+        description="When filtering by rule version, require a positive pipeline file check.",
+    )
     summary_only: bool = Field(
         default=False,
         description="Omit snippets and range arrays while retaining verdicts and agent range counts.",
     )
-    agent_labeler_id: int | None = Field(default=None, ge=1)
-    peer_labeler_id: int | None = Field(default=None, ge=1)
-    reviewer_origin: ReviewerOrigin | None = None
+    agent_labeler_id: int | None = Field(
+        default=None,
+        ge=1,
+        description="Use this saved agent labeler for agent comparisons or missing-result checks.",
+    )
+    peer_labeler_id: int | None = Field(
+        default=None,
+        ge=1,
+        description="Use this second labeler for agent-to-agent comparisons.",
+    )
+    reviewer_origin: ReviewerOrigin | None = Field(
+        default=None,
+        description="Limit comparisons to annotations from this source. Use human for any human annotation.",
+    )
     issues: list[str] = Field(
         default_factory=list,
         max_length=12,
-        description="Available issues: " + ", ".join(FILTERS),
+        description="Issue filters to apply to runs. Supported values are "
+        + ", ".join(FILTERS)
+        + ".",
     )
-    match: Literal["all", "any"] = "all"
-    path: str | None = Field(default=None, max_length=500)
-    source_text: str | None = Field(default=None, max_length=500)
-    min_confidence: float | None = Field(default=None, ge=0, le=1)
-    max_confidence: float | None = Field(default=None, ge=0, le=1)
-    sort: TraceSort = "relevance"
-    limit: int = Field(default=20, ge=1, le=100)
-    offset: int = Field(default=0, ge=0)
+    match: Literal["all", "any"] = Field(
+        default="all", description="Require all or any issues on the same run."
+    )
+    path: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Case-insensitive substring of the file path.",
+    )
+    source_text: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Case-insensitive substring of the stored source.",
+    )
+    min_confidence: float | None = Field(
+        default=None, ge=0, le=1, description="Minimum pipeline file-check confidence."
+    )
+    max_confidence: float | None = Field(
+        default=None, ge=0, le=1, description="Maximum pipeline file-check confidence."
+    )
+    sort: TraceSort = Field(
+        default="relevance",
+        description="Confidence sorts consider matching file checks. Disagreement sorts by the number of matching runs with a disagreement.",
+    )
+    limit: int = Field(
+        default=20, ge=1, le=100, description="Maximum number of traces per page."
+    )
+    offset: int = Field(
+        default=0, ge=0, description="Number of traces to skip before this page."
+    )
 
 
 async def search_rows(conn, search: TraceSearch, *, pipeline_only=False):

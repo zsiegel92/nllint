@@ -68,8 +68,10 @@ class LintRequest(Strict):
 
 
 class LineRange(Strict):
-    start: int = Field(strict=True, ge=1)
-    end: int = Field(strict=True, ge=1)
+    start: int = Field(
+        strict=True, ge=1, description="First line of the range, counted from 1."
+    )
+    end: int = Field(strict=True, ge=1, description="Last included line of the range.")
 
     @model_validator(mode="after")
     def ordered(self):
@@ -104,7 +106,10 @@ class BotIdentity(Strict):
 
 
 class Attribution(Strict):
-    labeler_type: Literal["HUMAN", "BOT"] | None = None
+    labeler_type: Literal["HUMAN", "BOT"] | None = Field(
+        default=None,
+        description="Annotation author type. Defaults to BOT for bearer-key review requests.",
+    )
     labeler_identity: (
         Annotated[HumanIdentity | BotIdentity, Field(discriminator="type")] | None
     ) = None
@@ -121,13 +126,22 @@ class Attribution(Strict):
 
 
 class FileAnnotation(Attribution):
-    decision: bool | None
-    reject_all: bool = False
-    run_id: int | None = Field(default=None, ge=1)
+    decision: bool | None = Field(
+        description="True confirms a violation, false suppresses findings for the pair, and null clears the annotation.",
+    )
+    reject_all: bool = Field(
+        default=False,
+        description="Also mark candidate ranges as no violation. Requires decision=false.",
+    )
+    run_id: int | None = Field(
+        default=None, ge=1, description="Run reviewed when making this decision."
+    )
 
 
 class RangeAnnotation(LineRange, Attribution):
-    decision: bool | None
+    decision: bool | None = Field(
+        description="True confirms the range, false marks it as no violation, and null clears the annotation.",
+    )
 
 
 class KeyName(Strict):

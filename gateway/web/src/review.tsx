@@ -21,7 +21,7 @@ function Verdict({decision, confidence}: {decision: Label; confidence?: number |
 
 function Stage({cell}: {cell: Cell}) {
   return <span className={`badge ${cell.stage === 'failed' ? 'violation' : 'neutral'}`}>
-    {{file: 'Checking file', ranges: 'Finding ranges', adjudication: 'Adjudicating', failed: 'Failed', ready: 'No decision'}[cell.stage]}
+    {{file: 'Checking file', ranges: 'Finding ranges', adjudication: 'Checking ranges', failed: 'Failed', ready: 'No decision'}[cell.stage]}
   </span>;
 }
 
@@ -42,26 +42,29 @@ function FileFollowup({cell, save, busy}: {cell: Cell; save: SetFileLabel; busy:
   </div>;
 }
 
-function RangeStageCard({trace, cell, adjudicated, open, language}: {
-  trace: Trace; cell: Cell; adjudicated?: boolean; open: OpenReview; language: Language;
+function RangeResults({trace, cell, stages, open, language}: {
+  trace: Trace; cell: Cell; stages: Mode[]; open: OpenReview; language: Language;
 }) {
-  const ranges = adjudicated ? cell.ranges.filter(range => range.model_decision !== null) : cell.ranges;
-  const inProgress = adjudicated ? cell.stage === 'adjudication' : cell.stage === 'ranges';
-  const discoveryEmpty = !adjudicated && cell.ranges_checked && !cell.ranges.some(range => range.candidate);
-  if (!ranges.length && !inProgress && !discoveryEmpty) return null;
+  const showCandidates = stages.includes('ranges');
+  const showChecked = stages.includes('adjudication');
+  const ranges = cell.ranges.filter(range =>
+    showCandidates || (showChecked && range.model_decision !== null));
+  const inProgress = (showCandidates && cell.stage === 'ranges') || (showChecked && cell.stage === 'adjudication');
+  const noCandidates = showCandidates && cell.ranges_checked && !cell.ranges.some(range => range.candidate);
+  if (!ranges.length && !inProgress && !noCandidates) return null;
   return <section className="stage-card">
     <div className="stage-card-heading">
-      <strong>{adjudicated ? 'Snippet Adjudication' : 'Ranges'}</strong>
-      <button type="button" className="icon-action" aria-label={`View ${adjudicated ? 'adjudication' : 'ranges'} for ${cell.rule_id}`}
+      <strong>Ranges</strong>
+      <button type="button" className="icon-action" aria-label={`Review ranges for ${cell.rule_id}`}
         onClick={() => open(trace, cell, 'ranges')}><Eye size={15} aria-hidden="true"/></button>
     </div>
     {inProgress && <small><Stage cell={cell}/></small>}
-    {discoveryEmpty && <small>No candidate ranges</small>}
+    {noCandidates && <small>Pipeline found no candidate ranges</small>}
     {ranges.map(range => <div className="stage-range" key={rangeParam(range)}>
       <RangeLink range={range} cell={cell} onClick={() => open(trace, cell, 'ranges', range)}/>
-      <small>{adjudicated || !range.candidate ? rangeStatus(range) : 'Candidate range'}</small>
-      {(adjudicated || !range.candidate) && <AnnotationVerdict identity={range.labeler_identity} decision={range.annotation}/>}
-      {adjudicated && range.preview && <CodeBlock source={range.preview} language={language}/>}
+      <small>{rangeStatus(range, showChecked)}</small>
+      <AnnotationVerdict identity={range.labeler_identity} decision={range.annotation}/>
+      {showChecked && range.model_decision !== null && range.preview && <CodeBlock source={range.preview} language={language}/>}
     </div>)}
   </section>;
 }
@@ -88,12 +91,14 @@ export function Matrix({traces, stages, open, openFile, onRule, languages, trace
     <tbody>{traces.map(trace => <tr key={trace.id}>
       <th scope="row">
         <Link className="file-name" to={traceLink(trace)}>{trace.file_path}</Link>
-        <button type="button" className="text-button" aria-label={`View file ${trace.file_path}`}
-          onClick={() => openFile(trace)}>View file</button>
-        {runAgent && <button type="button" disabled={agentBusy} onClick={() => runAgent([...new Set(trace.cells.map(cell => cell.run_id))])}>Label all file rules</button>}
-        <Link className="text-button" to={compareLink(trace)}>Compare revisions</Link>
+        <div className="file-actions">
+          <button type="button" className="text-button" aria-label={`View file ${trace.file_path}`}
+            onClick={() => openFile(trace)}>View file</button>
+          {runAgent && <button type="button" disabled={agentBusy} onClick={() => runAgent([...new Set(trace.cells.map(cell => cell.run_id))])}>Run labeler on all rules</button>}
+          <Link className="text-button" to={compareLink(trace)}>Compare revisions</Link>
+        </div>
         <small>{trace.project} · {trace.key_name}</small>
-        <small>Score {trace.score} · {new Date(trace.created_at).toLocaleString()}</small>
+        <small>{new Date(trace.created_at).toLocaleString()}</small>
       </th>
       {columns.map(column => {
         const cell = trace.cells.find(item => item.rule_version === column.rule_version);
@@ -105,16 +110,15 @@ export function Matrix({traces, stages, open, openFile, onRule, languages, trace
             onChange={() => onSelect({trace_id: trace.id, run_id: cell.run_id})}/>
             Select <span className="sr-only">{cell.rule_id} for {trace.file_path}</span></label>
           {stages.includes('files') && <section className="stage-card">
-            <div className="stage-card-heading"><strong>File decision</strong>
+            <div className="stage-card-heading"><strong>Pipeline file check</strong>
               <button type="button" className="icon-action" aria-label={`Review file decision for ${cell.rule_id}`}
                 onClick={() => open(trace, cell, 'files')}><Pencil size={14} aria-hidden="true"/></button></div>
-            <span className="pipeline-verdict"><small>Pipeline</small><FileVerdict cell={cell}/></span>
+            <div className="pipeline-verdict"><FileVerdict cell={cell}/></div>
           </section>}
           {stages.includes('files') && <AnnotationVerdict identity={cell.labeler_identity} decision={cell.file_label}/>}
-          {stages.includes('ranges') && <RangeStageCard trace={trace} cell={cell} language={language} open={open}/>}
-          {stages.includes('adjudication') && <RangeStageCard trace={trace} cell={cell} language={language} open={open} adjudicated/>}
+          <RangeResults trace={trace} cell={cell} stages={stages} language={language} open={open}/>
           <AgentResults cell={cell} open={range => open(trace, cell, 'ranges', range)}/>
-          {runAgent && <button type="button" disabled={agentBusy} onClick={() => runAgent([cell.run_id])}>Label this rule</button>}
+          {runAgent && <button type="button" disabled={agentBusy} onClick={() => runAgent([cell.run_id])}>Run labeler</button>}
         </td>;
       })}
     </tr>)}</tbody>
@@ -132,7 +136,7 @@ function ProviderRequestList({history}: {history: ProviderHistory}) {
     </div>)}
     {history.requests.length === 0 && <p className="muted">No provider requests recorded for this run.</p>}
     {history.requests.map(item => <details key={item.id}>
-      <summary>{({file: 'File decision', ranges: 'Range discovery', adjudication: 'Snippet adjudication'})[item.stage]}
+      <summary>{({file: 'File decision', ranges: 'Range suggestions', adjudication: 'Range checks'})[item.stage]}
         {' · '}{item.reused ? 'Reused request' : (item.http_status ?? item.transport_error ?? 'Outcome pending')}
         {' · '}{new Date(item.started_at).toLocaleString()}</summary>
       {item.resolved_model && <div>Served by {item.resolved_model}{item.resolved_service_tier && ` · ${item.resolved_service_tier}`}</div>}
@@ -212,7 +216,7 @@ function RuleCard({api, trace, cell, focused, canAnnotate, saveFile, busy, refre
     <div className="review-rule-header">
       <div className="review-rule-summary">
         <span className="review-rule-name"><strong>{cell.rule_id}</strong><small>{cell.rule_path}</small></span>
-        <span className="pipeline-verdict"><small>Pipeline</small><FileVerdict cell={cell}/></span>
+        <span className="pipeline-verdict"><small>Pipeline file check</small><FileVerdict cell={cell}/></span>
         <AnnotationVerdict identity={cell.labeler_identity} decision={cell.file_label}/>
         {canAnnotate && <LabelButtons active={cell.file_label} disabled={busy} save={decision => saveFile(cell, decision)}/>}
       </div>

@@ -17,15 +17,16 @@ export function LabelButtons({active, save, disabled}: {
   return <div className="label-buttons">
     <button type="button" aria-pressed={active === false} disabled={disabled} onClick={() => save(false)}>No violation</button>
     <button type="button" aria-pressed={active === true} disabled={disabled} onClick={() => save(true)}>Violates</button>
-    {active !== null && <button type="button" className="quiet" disabled={disabled} onClick={() => save(null)}>Clear</button>}
+    {active !== null && <button type="button" className="quiet" disabled={disabled} onClick={() => save(null)}>Clear annotation</button>}
   </div>;
 }
 
-export function rangeStatus(range: Range) {
-  if (range.agent) return `Agent violation · ${range.agent.name}`;
-  if (!range.candidate) return 'Reviewer-added range';
-  if (range.model_decision === null) return 'Candidate · awaiting adjudication';
-  return range.model_decision ? 'Adjudicated violation' : 'Adjudicated no violation';
+export function rangeStatus(range: Range, showCheck = true) {
+  if (range.agent) return `Violation found by ${range.agent.name}`;
+  if (!range.candidate) return 'Added in review';
+  if (!showCheck) return 'Pipeline candidate';
+  if (range.model_decision === null) return 'Pipeline candidate · unchecked';
+  return range.model_decision ? 'Pipeline found a violation' : 'Pipeline found no violation';
 }
 
 export function RangeLink({range, cell, onClick}: {range: Range; cell: Cell; onClick: () => void}) {
@@ -64,7 +65,7 @@ function colorStyle(color: string, column?: number): CSSProperties & {'--rule-co
 export function AnnotationVerdict({identity, decision}: {identity: Identity | null; decision: Label}) {
   if (decision === null) return null;
   return <span className="annotation-verdict">
-    <span>{attribution(identity)}</span>
+    <span>{identity ? `${attribution(identity)} annotation` : attribution(identity)}</span>
     <strong>{label(decision)}</strong>
   </span>;
 }
@@ -140,9 +141,9 @@ export function SourceReview({title, lines, cells, focus, onFocus, language, onL
     {save && markers.length > 0 && <div className="range-legend">
       {markers.some(marker => marker.range.agent) && <span><i data-state="agent"/> Agent violation</span>}
       {markers.some(marker => marker.range.annotation !== null) && <span><i data-reviewed="true"/> Reviewed range</span>}
-      <span><i data-state="candidate"/> Candidate</span>
-      <span><i data-state="violation"/> Adjudicated violation</span>
-      <span><i data-state="clear"/> Adjudicated no violation</span>
+      <span><i data-state="candidate"/> Unchecked candidate</span>
+      <span><i data-state="violation"/> Pipeline violation</span>
+      <span><i data-state="clear"/> Pipeline no violation</span>
       {markers.some(marker => !marker.range.candidate && !marker.range.agent) && <span><i data-state="human"/> Reviewer-added</span>}
     </div>}
     {focused && save && !adding && <div className="focused-annotation" style={colorStyle(focused.color)}

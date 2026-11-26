@@ -9,7 +9,7 @@ The Rust client sends one file and the rules with local cache misses. It polls p
 | `GET /v1/sync?project=…&cursor=…` | Return the processing version and changed file–rule annotation revisions for this API key and project. |
 | `GET /api/rules` | Search stored rule versions and their positive counts as a signed-in operator. |
 | `GET /api/runs/{id}/provider-requests` | Read the run’s settings snapshot and upstream requests as a signed-in operator. |
-| `/docs` | FastAPI request and operator route reference. |
+| `/docs` | Interactive REST reference. See the [REST and MCP guide](api.md) for review and evaluation. |
 
 ## Ownership
 
@@ -27,14 +27,9 @@ The local SQLite cache scopes entries to the gateway URL, API key, project, file
 
 The gateway retains submitted source and rule text in Postgres for review and exports. Source goes to the project’s configured decision provider and OpenRouter-compatible range endpoint. Langfuse records stage observations with rule identifiers and model outputs.
 
-Choose **All lint data** in the JSONL export menu to download one record per trace and rule. It includes source, rule text, prompt, model decisions and confidence, candidate ranges, and any human labels. An unset human label is `null`. The export respects the project, API key, rule, and trace scope. Open **All traces** and clear those filters to export across projects.
-
-Choose **All annotated data** for the same format restricted to records with a human file decision or at least one human range label. Unlabeled ranges on those records are included as context with a `null` annotation.
-
-
 ## Projects and API keys
 
-The client sends a project ID with each lint request. Set `project_id` in project settings to use a stable name across checkouts. Without it, the CLI combines the project folder name with a short hash of its canonical path. The gateway creates the project on the first lint. Create it in Pipelines first if you want to configure models beforehand.
+The client sends a project ID with each lint request. Set `project_id` in project settings to use a stable name across checkouts. Without it, the CLI combines the project folder name with a short hash of its canonical path. The gateway creates the project on the first lint. Create it in **Projects** first if you want to configure models beforehand.
 
 API keys authenticate clients. A key can submit work for multiple projects, and a project can receive work from multiple keys. Creating a key does not create a project. A rule history parent includes revisions of matching relative rule paths in the child's Rule history. Rule selection and model routing still come from the project's own settings.
 
@@ -42,7 +37,7 @@ API keys authenticate clients. A key can submit work for multiple projects, and 
 
 The gateway stores the Markdown content and hash submitted with each rule. The Rules picker groups versions by project, client rule ID, relative path, and content hash. Two pieces of Markdown at the same path appear as separate versions when their hashes differ. The counts reflect positive file decisions, candidate ranges, and positive adjudications in the selected project and API-key scope.
 
-Selecting versions shows traces with a positive file decision for any selected version. The default relevance sort adds one point per positive file decision, two per candidate range, and three per positive adjudication across all rule results on the trace. Newer traces break ties. Find presets and ordering strategies are defined separately in the gateway.
+In the default trace view, selecting versions finds positive file checks for any selected version. Confidence and annotation filters can also surface negative checks. The default relevance sort adds one point per positive file decision, two per candidate range, and three per positive adjudication across all rule results on the trace. Newer traces break ties. Find presets and ordering strategies are defined separately in the gateway.
 
 ## Provider history and usage
 
@@ -52,8 +47,6 @@ Each outbound decision batch, range request, and adjudication batch gets a `prov
 
 The **Provider requests** panel shows the recorded settings and usage. It exposes model and tier information while keeping credentials encrypted. For future billing, count each request ID once and use the provider's cost and usage fields where supplied. Runs created before request logging still have their settings snapshot. Historical provider charges cannot be reconstructed from those settings.
 
-## Extension points
+## Editor annotations
 
-An IDE annotation flow can reuse the same range labels and cursor invalidation. It needs a project-scoped client annotation endpoint and an exact diagnostic identity issued by the gateway. The CLI can keep its existing file–rule cache because a label raises that pair’s revision.
-
-Rule identity uses the relative Markdown path, while execution fingerprints use the input texts. A future optimized rule can retain the original path and store both prompt variants, with explicit provenance and a selection in the project configuration. The executed prompt variant belongs in the stage cache identity.
+On a saved VS Code diagnostic, a Quick Fix writes a range annotation through the editor endpoint. The gateway checks the file contents and submitting API key against the diagnostic's pair ID, then attributes the annotation to the key owner. The watch process refreshes the affected cache entry through the annotation sync stream.

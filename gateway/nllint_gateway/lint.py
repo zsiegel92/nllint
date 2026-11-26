@@ -8,14 +8,19 @@ from .auth import client_key
 from .contracts import LintRequest, ProjectName
 from .db import identity, notify_work, request_db
 
-router = APIRouter(prefix="/v1")
+router = APIRouter(prefix="/v1", tags=["Lint clients"])
 
 
 def digest(text: str) -> str:
     return blake3(text.encode()).hexdigest()
 
 
-@router.post("/lint")
+@router.post(
+    "/lint",
+    summary="Submit a file for linting",
+    description="Submit source and one or more Markdown rules. HTTP 202 means the trace is queued.",
+    responses={202: {"description": "Lint work is pending"}},
+)
 async def lint(body: LintRequest, request: Request, key_id: int = Depends(client_key)):
     routing = request.app.state.routing
     source_hash = digest(body.source)
@@ -149,7 +154,12 @@ async def lint(body: LintRequest, request: Request, key_id: int = Depends(client
     )
 
 
-@router.get("/lint/{trace_id}")
+@router.get(
+    "/lint/{trace_id}",
+    summary="Read lint results",
+    description="Poll the trace ID returned by submission until the status is ready or failed.",
+    responses={202: {"description": "Lint work is pending"}},
+)
 async def result(trace_id: str, request: Request, key_id: int = Depends(client_key)):
     async with request_db(request, readonly=True) as conn:
         response = await read_result(conn, trace_id, key_id)
@@ -214,7 +224,7 @@ async def read_result(conn, trace_id, key_id):
     }
 
 
-@router.get("/sync")
+@router.get("/sync", summary="Check for pipeline and annotation changes")
 async def sync(
     project: ProjectName,
     request: Request,

@@ -1,20 +1,20 @@
 import {DatasetActions, EvalSets} from './evaluation';
 import type {Selection} from './evaluation';
 import {LabelerSettings} from './agentic';
-import type {Labeler} from './api';
+import {Keys, ModelSettings} from './settings';
+import {TraceFilters, traceSearchParams} from './trace-filters';
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import type {FormEvent} from 'react';
 import {createRoot} from 'react-dom/client';
 import {useQueryStates} from 'nuqs';
 import {BrowserRouter, Link, matchRoutes, useLocation, useNavigate} from 'react-router';
 import {NuqsAdapter} from 'nuqs/adapters/react-router/v7';
-import {closedReview, exportKinds, findRangesPath, gatewayQuery, issueLabels, modelsPath, navigation, rangeParam, routes, sectionPaths, tracePath} from './navigation';
+import {closedReview, exportKinds, findRangesPath, gatewayQuery, modelsPath, navigation, rangeParam, routes, sectionPaths, tracePath} from './navigation';
 import {Api} from './api';
-import type {Cell, Key, Label, Mode, Project, Provider, ProviderEdit, Range, ReviewMode, Routing, Run, Trace} from './api';
+import type {Cell, Key, Label, Labeler, Project, Range, ReviewMode, Run, Trace} from './api';
 import type {Section} from './navigation';
 import {isLanguage, languageForPath} from './code';
 import {Matrix, ReviewPanel} from './review';
-import {RulePicker} from './rule-picker';
 import {TableStages} from './stage-selector';
 import type {Bounds} from './source-review';
 import './style.css';
@@ -196,7 +196,7 @@ function FindRanges({api, run}: {api: Api; run: string}) {
     {error ? <>
       <p role="alert" className="error">{error}</p>
       <button type="button" onClick={() => {setError(''); setAttempt(value => value + 1);}}>Try again</button>
-    </> : <p role="status"><span className="spinner"/> Finding and adjudicating candidate ranges…</p>}
+    </> : <p role="status"><span className="spinner"/> Looking for possible violations and checking each range…</p>}
     <Link to="/traces">Back to traces</Link>
   </section></main>;
 }
@@ -206,7 +206,7 @@ function Workspace({api, logout, section, project, traceId, models}: {
 }) {
   const navigate = useNavigate();
   const [query, setQuery] = useQueryStates(navigation, {history: 'push'});
-  const {mode, stages, issue, key, rule, rules, sort, exportKind} = query;
+  const {mode, stages, key, rule, rules, exportKind} = query;
   const page = Math.max(0, query.page);
   const selectedTrace = query.reviewTrace ?? (query.run ? traceId : undefined);
   const [selection, setSelection] = useState<Selection[]>([]);
@@ -260,21 +260,7 @@ function Workspace({api, logout, section, project, traceId, models}: {
   if (project) ruleScope.set('project', project);
   if (key) ruleScope.set('key_id', key);
   if (traceId) ruleScope.set('trace_id', traceId);
-  const traceParams = new URLSearchParams(scope);
-  traceParams.set('issue', issue);
-  if (query.pathContains.trim()) traceParams.set('path', query.pathContains.trim());
-  if (query.sourceContains.trim()) traceParams.set('source_text', query.sourceContains.trim());
-  if (query.minConfidence !== '') traceParams.set('min_confidence', query.minConfidence);
-  if (query.maxConfidence !== '') traceParams.set('max_confidence', query.maxConfidence);
-  if (query.filterAgent) traceParams.set('agent_labeler_id', String(query.filterAgent));
-  if (query.peerAgent) traceParams.set('peer_labeler_id', String(query.peerAgent));
-  if (query.reviewerOrigin) traceParams.set('reviewer_origin', query.reviewerOrigin);
-  if (query.extraIssue) traceParams.append('extra_issue', query.extraIssue);
-  traceParams.set('match', query.match);
-  traceParams.set('sort', sort);
-  traceParams.set('limit', String(pageSize));
-  traceParams.set('offset', String(page * pageSize));
-  if (traceId) traceParams.set('trace_id', traceId);
+  const traceParams = traceSearchParams(scope, query, {traceId, limit: pageSize, offset: page * pageSize});
   const traceRequest = `/traces?${traceParams}`;
   const data = tracePage?.path === traceRequest ? tracePage : undefined;
   useEffect(() => {
@@ -362,10 +348,6 @@ function Workspace({api, logout, section, project, traceId, models}: {
   const pageSelection = traces.flatMap(trace => trace.matching_run_ids
     .filter(id => trace.cells.some(cell => cell.run_id === id)).map(run_id => ({trace_id: trace.id, run_id})));
   const matchingRuns = [...new Set(pageSelection.map(item => item.run_id))];
-  const activeIssues = new Set([issue, query.extraIssue]);
-  const comparePeers = activeIssues.has('agent-agent-disagreements') || sort === 'disagreement';
-  const compareAgent = comparePeers || ['agent-disagreements', 'agent-review-disagreements', 'agent-unlabeled'].some(filter => activeIssues.has(filter));
-  const compareReviewer = sort === 'disagreement' || activeIssues.has('disagreements') || activeIssues.has('agent-review-disagreements');
   const selectionKey = (item: Selection) => `${item.trace_id}:${item.run_id}`;
   const selected = new Set(selection.map(selectionKey));
   function selectItems(items: Selection[]) {
@@ -423,8 +405,8 @@ function Workspace({api, logout, section, project, traceId, models}: {
       <Link className="brand" to="/traces"><img className="brand-icon" src="/favicon.ico" alt=""/> NLLint Gateway</Link>
       <nav aria-label="Workspace">
         <Link to="/traces" aria-current={section === 'traces' ? 'page' : undefined}>Traces</Link>
-        <Link to="/pipelines" aria-current={section === 'projects' ? 'page' : undefined}>Pipelines</Link>
-        <Link to="/agentic-labelers" aria-current={section === 'labelers' ? 'page' : undefined}>Agentic labelers</Link>
+        <Link to="/pipelines" aria-current={section === 'projects' ? 'page' : undefined}>Projects</Link>
+        <Link to="/agentic-labelers" aria-current={section === 'labelers' ? 'page' : undefined}>Agent labelers</Link>
         <Link to="/eval-sets" aria-current={section === 'evals' ? 'page' : undefined}>Evaluation sets</Link>
         <Link to="/api-keys" aria-current={section === 'keys' ? 'page' : undefined}>API keys</Link>
       </nav>
@@ -435,77 +417,28 @@ function Workspace({api, logout, section, project, traceId, models}: {
         {error && <p role="alert" className="error">{error} <button type="button" onClick={() => setError('')}>Dismiss</button></p>}
         {section === 'traces' && <>
           <div className="page-heading">
-            <h1>{traceId ? 'Trace review' : 'Lint traces'}</h1>
+            <div><h1>{traceId ? 'Trace review' : 'Lint traces'}</h1>
+              <p className="muted trace-intro">Each row is a file snapshot. Each rule has its own results for that file.</p></div>
           </div>
           {traceId && <Link to={gatewayQuery(tracePath(project), {...query, ...closedReview, page: null})}>← Project traces</Link>}
-          <div className="filters">
-            <label>Find<select value={issue} onChange={event => {
-              const next = event.target.value;
-              void setQuery({issue: next, page: null, sort: next === 'agent-disagreements' ? 'confidence-desc'
-                : ['agent-review-disagreements', 'agent-agent-disagreements'].includes(next) ? 'disagreement'
-                : next === 'low-confidence' ? 'confidence-asc' : 'relevance'});
-            }}>
-              {Object.entries(issueLabels).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
-            </select></label>
-            <label>Sort<select value={sort} onChange={event => void setQuery({sort: event.target.value as typeof sort, page: null})}>
-              <option value="relevance">Relevance</option><option value="disagreement">Most disagreeing rules</option><option value="newest">Newest</option>
-              <option value="confidence-asc">Lowest pipeline confidence</option>
-              <option value="confidence-desc">Highest pipeline confidence</option><option value="path">File path</option>
-            </select></label>
-            <label>Project<select value={project} onChange={event => void navigate(gatewayQuery(tracePath(event.target.value), {...query, ...closedReview, rules: null, rule: null, page: null}))}>
-              <option value="">All projects</option>{projects.map(item => <option key={item.id} value={item.name}>{item.name}</option>)}
-            </select></label>
-            <label>API key<select value={key} onChange={event => void setQuery({key: event.target.value, page: null})}>
-              <option value="">All keys</option>{keys.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
-            </select></label>
-            <RulePicker api={api} scope={ruleScope.toString()} selected={rules}
-              onChange={rules => void setQuery({rules, rule: null, page: null})}/>
-            {rule && <button type="button" onClick={() => void setQuery({rule: null, page: null})}>Clear rule path filter</button>}
-          </div>
-          <details className="dataset-actions" open={Boolean(query.pathContains || query.sourceContains || query.extraIssue || query.filterAgent || query.peerAgent || query.reviewerOrigin || query.minConfidence || query.maxConfidence) || undefined}>
-            <summary>Advanced filters</summary>
-            <div className="filters">
-              <label>Path contains<input maxLength={500} value={query.pathContains} onChange={event => void setQuery({pathContains: event.target.value, page: null}, {history: 'replace'})}/></label>
-              <label>Source contains<input maxLength={500} value={query.sourceContains} onChange={event => void setQuery({sourceContains: event.target.value, page: null}, {history: 'replace'})}/></label>
-              <label>Minimum file confidence<input type="number" min={0} max={1} step={0.01} value={query.minConfidence} onChange={event => void setQuery({minConfidence: event.target.value, page: null}, {history: 'replace'})}/></label>
-              <label>Maximum file confidence<input type="number" min={0} max={1} step={0.01} value={query.maxConfidence} onChange={event => void setQuery({maxConfidence: event.target.value, page: null}, {history: 'replace'})}/></label>
-              {compareAgent && <label>Agent result to check<select value={query.filterAgent ?? ''} onChange={event => {
-                const filterAgent = Number(event.target.value) || null;
-                void setQuery({filterAgent, peerAgent: filterAgent === query.peerAgent ? null : query.peerAgent, page: null});
-              }}>
-                <option value="">Any agent</option>{labelers.map(item => <option key={item.id} value={item.id}>{item.name} · {item.model}</option>)}
-              </select><small>Use results from this saved labeler when checking for disagreements or missing labels.</small></label>}
-              {comparePeers && <label>Compare with another agent<select value={query.peerAgent ?? ''} onChange={event => void setQuery({peerAgent: Number(event.target.value) || null, page: null})}>
-                <option value="">Any different agent</option>{labelers.filter(item => item.id !== query.filterAgent).map(item => <option key={item.id} value={item.id}>{item.name} · {item.model}</option>)}
-              </select><small>For agent-to-agent disagreements, compare the first labeler with this one.</small></label>}
-              {compareReviewer && <label>Reviewer source<select value={query.reviewerOrigin} onChange={event => void setQuery({reviewerOrigin: event.target.value, page: null})}>
-                <option value="">Any reviewer</option><option value="human">Any human</option><option value="webapp">Signed browser</option>
-                <option value="ide">IDE</option><option value="mcp">External MCP</option><option value="api">External REST</option><option value="legacy">Legacy</option>
-              </select><small>Limit pipeline or agent comparisons to annotations from this source.</small></label>}
-              <label>Additional issue<select value={query.extraIssue} onChange={event => void setQuery({extraIssue: event.target.value, page: null})}>
-                <option value="">None</option>{Object.entries(issueLabels).filter(([id]) => id !== 'all').map(([id, name]) => <option key={id} value={id}>{name}</option>)}
-              </select></label>
-              {query.extraIssue && <label>Combine issues<select value={query.match} onChange={event => void setQuery({match: event.target.value === 'any' ? 'any' : 'all', page: null})}>
-                <option value="all">Match both</option><option value="any">Match either</option>
-              </select></label>}
-            </div>
-          </details>
+          <TraceFilters api={api} query={query} setQuery={setQuery} project={project}
+            projects={projects} keys={keys} labelers={labelers} ruleScope={ruleScope.toString()}/>
           <DatasetActions api={api} selection={selection} labelers={labelers} onError={setError}
             matchingOnPage={pageSelection.length} onSelectPage={() => selectItems(pageSelection)} onClear={() => setSelection([])}
             scopeDownload={<div className="export" role="group" aria-label="Project and rule JSONL options">
-              <label className="sr-only" htmlFor="dataset">Dataset to export</label>
+              <label htmlFor="dataset">Records
               <select id="dataset" value={exportKind} onChange={event => {
                 const value = exportKinds.find(kind => kind === event.target.value);
                 if (value) void setQuery({exportKind: value});
               }}>
                 <option value="files">File decisions</option>
                 <option value="ranges">Range examples</option>
-                <option value="adjudication">Adjudication examples</option>
-                <option value="annotated">All annotated data</option>
-                <option value="all">All lint data</option>
-              </select>
+                <option value="adjudication">Range annotations</option>
+                <option value="annotated">Annotated runs</option>
+                <option value="all">All runs</option>
+              </select></label>
               <label><input type="checkbox" checked={Boolean(query.includeAgentic)}
-                onChange={event => void setQuery({includeAgentic: Number(event.target.checked)})}/>Include agentic labels</label>
+                onChange={event => void setQuery({includeAgentic: Number(event.target.checked)})}/>Include agent results</label>
               <button type="button" onClick={download}>Download .jsonl</button>
             </div>}/>
           <div className="matrix-bar">
@@ -514,19 +447,19 @@ function Workspace({api, logout, section, project, traceId, models}: {
           </div>
           <div className="matrix-bar agent-controls">
             {selectedLabeler ? <>
-              <label>Agent to run <select value={selectedLabeler.id} disabled={Boolean(agentProgress)}
+              <label>Labeler to run <select value={selectedLabeler.id} disabled={Boolean(agentProgress)}
                 onChange={event => void setQuery({agent: Number(event.target.value)})}>
                 {labelers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
               </select></label>
               <button type="button" disabled={Boolean(agentProgress) || !matchingRuns.length}
-                onClick={() => void runAgent(matchingRuns)}>Label {matchingRuns.length} matching {matchingRuns.length === 1 ? 'run' : 'runs'} on this page</button>
+                onClick={() => void runAgent(matchingRuns)}>Run on page matches ({matchingRuns.length})</button>
               {agentProgress && <>
                 <span role="status">{agentProgress.stopping ? 'Finishing current run' : 'Labeling'} · {agentProgress.done} of {agentProgress.total}</span>
                 {agentProgress.total - agentProgress.done > 1 && <button type="button" className="quiet"
                   disabled={agentProgress.stopping} onClick={stopAgentBatch}>Stop after current run</button>}
               </>}
               {agentSummary && <span role="status">{agentSummary}</span>}
-            </> : <Link to="/agentic-labelers">Configure an agentic labeler</Link>}
+            </> : <Link to="/agentic-labelers">Set up an agent labeler</Link>}
           </div>
           {data ? <Matrix selected={selected} onSelect={toggleItem}
             compareLink={trace => gatewayQuery(tracePath(trace.project), {pathContains: trace.file_path, key: String(trace.key_id), sort: 'newest'})}
@@ -548,27 +481,27 @@ function Workspace({api, logout, section, project, traceId, models}: {
         {section === 'labelers' && <LabelerSettings api={api} items={labelers} refresh={refresh} onError={setError}/>}
         {section === 'keys' && <Keys api={api} keys={keys} refresh={refresh} onError={setError}/>}
         {section === 'projects' && <>
-          <h1>Pipelines</h1>
-          <p>Projects group traces and model settings by the client’s <code>project_id</code>. API keys authenticate requests and can be used across projects.</p>
+          <h1>Projects</h1>
+          <p>A project groups lint traces and model settings under the <code>project_id</code> from your lint configuration.</p>
           <form className="create-project" onSubmit={createProject}>
             <label>Project ID<input value={projectName} maxLength={200} required
               onChange={event => setProjectName(event.target.value)}/></label>
             <button className="primary" disabled={busy || !projectName.trim()}>Create project</button>
           </form>
-          <p className="muted">Create a project to configure its models before the first lint. Otherwise, the first lint creates it. A rule history parent adds earlier versions of matching rule paths to Rule history.</p>
-          <div className="filters"><label>Projects with work submitted using API key<select value={key} onChange={event => void setQuery({key: event.target.value, page: null})}>
+          <p className="muted">The first lint request creates the project automatically. Create it here to choose its models in advance.</p>
+          <div className="filters"><label>Filter by API key<select value={key} onChange={event => void setQuery({key: event.target.value, page: null})}>
             <option value="">All keys</option>{keys.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select></label></div>
           {(key ? filteredProjects : projects).length ? <table className="settings-table">
-          <thead><tr><th>Project</th><th>Rules</th><th title="Unique lint requests recorded as traces">Requests</th><th>Inherits rule history from</th><th>Models</th></tr></thead>
+          <thead><tr><th>Project</th><th>Rules</th><th title="Unique lint requests recorded as traces">Requests</th><th>Include rule history from</th><th>Models</th></tr></thead>
           <tbody>{(key ? filteredProjects : projects).map(item => <tr key={item.id}>
             <th><Link to={gatewayQuery(tracePath(item.name), {key})}>{item.name}</Link></th>
             <td>{item.rules}</td>
             <td>{item.requests.toLocaleString()}</td>
-            <td><select aria-label={`Parent for ${item.name}`} value={item.parent ?? ''} onChange={event => {
+            <td><select aria-label={`Include rule history from another project for ${item.name}`} value={item.parent ?? ''} onChange={event => {
               api.request(`/projects/${item.id}/inheritance`, 'PUT', {parent: event.target.value || null})
                 .then(refresh).catch(error => setError(error.message));
-            }}><option value="">No parent</option>{projects.filter(parent => parent.id !== item.id).map(parent =>
+            }}><option value="">This project only</option>{projects.filter(parent => parent.id !== item.id).map(parent =>
               <option value={parent.name} key={parent.id}>{parent.name}</option>)}</select></td>
             <td><button type="button" onClick={() => void navigate(gatewayQuery(modelsPath(item.id), {key}))}>Configure models</button></td>
           </tr>)}</tbody></table> : <div className="empty">{key ? "No projects have work submitted using this API key." : "No projects yet."}</div>}
@@ -586,115 +519,6 @@ function Workspace({api, logout, section, project, traceId, models}: {
         onAllRules={() => open(active, undefined, mode)}/>}
 
     </main>
-  </>;
-}
-
-function editRoute(form: FormData, kind: keyof Routing, existing: Provider): ProviderEdit {
-  if (form.get(kind + '.reset')) return {reset: true};
-  const baseURL = String(form.get(kind + '.base') ?? '').trim();
-  const model = String(form.get(kind + '.model') ?? '').trim();
-  const secret = String(form.get(kind + '.key') ?? '').trim();
-  const tier = form.get(kind + '.tier');
-  return {
-    ...(baseURL !== existing.base_url ? {base_url: baseURL} : {}),
-    ...(model !== existing.model ? {model} : {}),
-    ...(secret ? {api_key: secret} : {}),
-    ...((tier === 'flex' || tier === 'fast') && tier !== existing.service_tier ? {service_tier: tier} : {}),
-  };
-}
-
-function ModelSettings({api, project, close}: {api: Api; project: Project; close: () => void}) {
-  const [routing, setRouting] = useState<Routing>();
-  const [revision, setRevision] = useState(0);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState('');
-  const [saved, setSaved] = useState(false);
-  const path = `/projects/${project.id}/routing`;
-  useEffect(() => {
-    let mounted = true;
-    api.json<Routing>(path).then(value => {if (mounted) setRouting(value);})
-      .catch(error => {if (mounted) setError(error.message);});
-    return () => {mounted = false;};
-  }, [api, path]);
-
-  function save(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!routing) return;
-    const form = new FormData(event.currentTarget);
-    setError('');
-    setSaved(false);
-    setPending(true);
-    api.json<Routing>(path, 'PUT', {
-      decision: editRoute(form, 'decision', routing.decision),
-      ranges: editRoute(form, 'ranges', routing.ranges),
-    }).then(value => {
-      setRouting(value);
-      setRevision(number => number + 1);
-      setSaved(true);
-    }).catch(error => setError(error.message)).finally(() => setPending(false));
-  }
-
-  return <section className="model-settings">
-    <div className="panel-heading"><h2>Models for {project.name}</h2><button type="button" onClick={close}>Close</button></div>
-    {error && <p className="error" role="alert">{error}</p>}
-    {saved && <p role="status">Model settings saved.</p>}
-    {!routing && !error && <p role="status">Loading model settings…</p>}
-    {routing && <form key={revision} onSubmit={save}>
-      <div className="provider-fields">
-        {(['decision', 'ranges'] as const).map(kind => <fieldset key={kind}>
-          <legend>{kind === 'decision' ? 'File decisions and adjudication' : 'Candidate ranges'}</legend>
-          <label>Provider base URL<input name={kind + '.base'} type="url" required defaultValue={routing[kind].base_url}/></label>
-          <label>Model<input name={kind + '.model'} required defaultValue={routing[kind].model}/></label>
-          {kind === 'ranges' && <label>Service tier
-            <select name={kind + '.tier'} defaultValue={routing.ranges.service_tier ?? 'flex'}>
-              <option value="flex">Flex</option>
-              <option value="fast">Fast</option>
-            </select>
-          </label>}
-          <label>API key<input name={kind + '.key'} type="password" autoComplete="new-password"
-            placeholder={routing[kind].custom_key ? 'Stored project key' : 'Uses gateway key'}/></label>
-          {routing[kind].overridden && <label className="inline-check"><input name={kind + '.reset'} type="checkbox"/> Restore gateway defaults</label>}
-        </fieldset>)}
-      </div>
-      <button type="submit" className="primary" disabled={pending}>Save model settings</button>
-    </form>}
-  </section>;
-}
-
-function Keys({api, keys, refresh, onError}: {api: Api; keys: Key[]; refresh: () => void; onError: (value: string) => void}) {
-  const [name, setName] = useState('');
-  const [secret, setSecret] = useState('');
-  const [pending, setPending] = useState(false);
-  function create(event: FormEvent) {
-    event.preventDefault();
-    setPending(true);
-    api.json<Key & {secret: string}>('/keys', 'POST', {name: name.trim()}).then(key => {
-      setSecret(key.secret);
-      setName('');
-      refresh();
-    }).catch(error => onError(error.message)).finally(() => setPending(false));
-  }
-  return <>
-    <h1>API keys</h1>
-    <p>Key names are labels for identifying credentials. The client’s project ID determines where lint traces appear.</p>
-    <form className="create-key" onSubmit={create}>
-      <label>Key name<input required maxLength={120} value={name} onChange={event => setName(event.target.value)}/></label>
-      <button className="primary" disabled={pending || !name.trim()}>Create API key</button>
-    </form>
-    {secret && <div className="secret">
-      <label>Copy this key now. It is shown once.<input readOnly value={secret} onFocus={event => event.target.select()}/></label>
-      <button type="button" onClick={() => navigator.clipboard.writeText(secret).catch(error => onError(error.message))}>Copy</button>
-      <button type="button" className="quiet" onClick={() => setSecret('')}>Done</button>
-    </div>}
-    {keys.length ? <table className="settings-table"><thead><tr><th>Name</th><th>Prefix</th><th>Status</th><th>Actions</th></tr></thead>
-    <tbody>{keys.map(key => <tr key={key.id}>
-      <th>{key.name}</th><td><code>{key.prefix}…</code></td><td>{key.revoked_at ? 'Revoked' : 'Active'}</td>
-      <td>{!key.revoked_at && <button type="button" onClick={() => {
-        if (window.confirm(`Revoke ${key.name}? Clients using it will lose access.`)) {
-          api.request(`/keys/${key.id}`, 'DELETE').then(refresh).catch(error => onError(error.message));
-        }
-      }}>Revoke</button>}</td>
-    </tr>)}</tbody></table> : <div className="empty">No API keys yet.</div>}
   </>;
 }
 

@@ -99,7 +99,7 @@ export function RulePicker({api, scope, selected, onChange}: {
           onMouseDown={event => event.preventDefault()} onClick={() => toggle(rule.id)}>
           <strong>{rule.name}</strong>
           <small>{rule.path} · {rule.project} · {rule.hash.slice(0, 8)}</small>
-          <small>File positives {rule.file_positives} · Range positives {rule.range_positives} · Adjudicated positives {rule.adjudicated_positives}</small>
+          <small>Files flagged {rule.file_positives} · Ranges suggested {rule.range_positives} · Ranges confirmed {rule.adjudicated_positives}</small>
         </button>)}
     </div>}
   </div>;

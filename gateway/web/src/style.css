@@ -41,7 +41,8 @@ pre { margin: .5rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .page-heading, .matrix-bar, .source-tools, .panel-heading { display: flex; justify-content: space-between; align-items: center; gap: .8rem; flex-wrap: wrap; }
 .page-heading { margin-bottom: 1.15rem; }
 .page-heading h1 { margin: 0; }
-.export { display: inline-flex; align-items: stretch; border: 1px solid #a8b9b1; border-radius: 6px; background: white; }
+.trace-intro { margin: .35rem 0 0; }
+.export { display: inline-flex; align-items: stretch; flex-wrap: wrap; border: 1px solid #a8b9b1; border-radius: 6px; background: white; }
 .export select, .export button { border: 0; min-width: 0; }
 .export select { border-radius: 5px 0 0 5px; }
 .export button { border-left: 1px solid var(--line); border-radius: 0 5px 5px 0; white-space: nowrap; }
@@ -62,6 +63,7 @@ thead th { background: #e9f0ec; position: sticky; top: 0; z-index: 2; text-wrap:
 .table-scroll td { border-left: 1px solid var(--line); }
 .table-scroll td > * { margin-bottom: .4rem; }
 .table-scroll small { display: block; font-weight: 450; overflow-wrap: anywhere; }
+.file-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .45rem; margin-block: .3rem; }
 .file-name { display: block; color: var(--ink); overflow-wrap: anywhere; }
 .column-rule, .text-button { border: 0; color: var(--brand); padding: .08rem .18rem; text-align: left; background: transparent; }
 .column-rule { font-weight: 700; }
@@ -134,7 +136,7 @@ details pre { max-height: 19rem; overflow: auto; }
 .rule-options button.active { outline: 2px solid var(--brand); outline-offset: -2px; }
 .stage-card, .review-rule { border: 1px solid var(--line); border-radius: 7px; padding: .5rem; background: #fbfcfb; }
 .stage-card-heading { display: flex; align-items: center; justify-content: space-between; gap: .65rem; margin-bottom: .3rem; }
-.stage-card + .stage-card, .stage-range + .stage-range { margin-top: .5rem; }
+td > :is(.stage-card, .annotation-verdict) + :is(.stage-card, .annotation-verdict), .stage-range + .stage-range, .agent-result + .agent-result { margin-top: .5rem; }
 .stage-range + .stage-range { padding-top: .35rem; border-top: 1px solid var(--line); }
 .stage-range pre { font-size: .76rem; margin-bottom: 0; }
 .icon-action, .range-link { display: inline-flex; align-items: center; gap: .28rem; color: var(--brand); padding: .22rem .32rem; }
@@ -181,8 +183,10 @@ details pre { max-height: 19rem; overflow: auto; }
 .range-marker[data-reviewed="true"], .range-legend i[data-reviewed="true"] { border-right: 2px solid #253f38; }
 .range-legend i[data-state="agent"] { border-left-color: #8554b3; }
 
-.dataset-actions { border: 1px solid var(--line); border-radius: 8px; padding: .65rem .85rem; margin-block: .6rem; }
-.dataset-actions summary { cursor: pointer; font-weight: 650; }
+.disclosure { border: 1px solid var(--line); border-radius: 8px; padding: .65rem .85rem; margin-block: .6rem; }
+.trace-data-actions { display: flex; align-items: flex-start; gap: .6rem; flex-wrap: wrap; }
+.trace-data-actions > .disclosure[open] { flex-basis: 100%; }
+.disclosure summary { cursor: pointer; font-weight: 650; }
 .trace-selection { display: inline-flex; align-items: center; gap: .35rem; }
 .eval-counts { display: flex; flex-wrap: wrap; gap: .7rem; }
 .eval-counts div { border: 1px solid var(--line); border-radius: 8px; padding: .6rem .85rem; min-width: 7rem; }
@@ -190,7 +194,7 @@ details pre { max-height: 19rem; overflow: auto; }
 
 
 .selection-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem 1rem; margin-block: .65rem; }
-.selection-controls p, .selection-section p { color: var(--muted); margin: .35rem 0; }
+.disclosure > p, .selection-controls p, .selection-section p { color: var(--muted); margin: .35rem 0; }
 .selection-button-group { display: inline-flex; align-items: stretch; }
 .selection-button-group button:first-child { border-radius: 6px 0 0 6px; }
 .selection-button-group button:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
@@ -203,3 +207,9 @@ details pre { max-height: 19rem; overflow: auto; }
 }
 .annotation-verdict > span { overflow-wrap: anywhere; }
 .stage-range > .annotation-verdict { margin-top: .3rem; }
+
+.disclosure label small { max-width: 19rem; }
+@media (max-width: 560px) {
+  .topbar nav { flex-wrap: wrap; }
+  .export { max-width: 100%; }
+}

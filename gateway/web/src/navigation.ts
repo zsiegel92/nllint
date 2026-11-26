@@ -29,18 +29,18 @@ export const exportKinds = [...modes, 'annotated', 'all'] as const;
 export const reviewModes = ['files', 'ranges'] as const;
 export const issueLabels = {
   all: 'All traces',
-  'file-range-positives': 'File- and Range-level positives',
-  'adjudicated-positives': 'Adjudicated Positives',
-  'no-ranges': 'Positive file, no ranges',
-  'all-rejected': 'Positive file, all ranges rejected',
-  disagreements: 'Reviewer and pipeline disagree',
+  'file-range-positives': 'File flagged, ranges suggested',
+  'adjudicated-positives': 'Pipeline confirmed a range',
+  'no-ranges': 'File flagged, no ranges found',
+  'all-rejected': 'File flagged, all ranges rejected',
+  disagreements: 'Annotation disagrees with pipeline',
   'rejected-candidates': 'Rejected candidates',
-  unreviewed: 'Unreviewed decisions',
-  'low-confidence': 'Low pipeline confidence',
+  unreviewed: 'Decisions awaiting review',
+  'low-confidence': 'Low file-check confidence',
   'agent-disagreements': 'Agent and pipeline disagree',
-  'agent-review-disagreements': 'Agent and reviewer disagree',
+  'agent-review-disagreements': 'Agent and annotation disagree',
   'agent-agent-disagreements': 'Two agents disagree',
-  'agent-unlabeled': 'Missing agent result',
+  'agent-unlabeled': 'Agent result missing',
   failed: 'Processing failed',
 };
 
