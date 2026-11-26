@@ -704,7 +704,9 @@ async def annotate_range(pair_id: int, body: RangeAnnotation, request: Request):
     return {"decision": body.decision}
 
 
-async def all_training_records(request, key_id, project, rule, trace_id, rule_version):
+async def training_records(
+    request, key_id, project, rule, trace_id, rule_version, annotated_only
+):
     query = f"""
         SELECT tr.trace_id,r.id AS run_id,f.id AS pair_id,r.version AS routing_version,
                r.provider_version_id,r.stage,r.error,p.name AS project,f.key_id,
@@ -727,10 +729,15 @@ async def all_training_records(request, key_id, project, rule, trace_id, rule_ve
         WHERE ($1::bigint IS NULL OR f.key_id=$1) AND ($2::text IS NULL OR p.name=$2)
         AND ($3::text IS NULL OR f.rule_path=$3) AND ($4::text IS NULL OR tr.trace_id=$4)
         AND (cardinality($5::text[])=0 OR {RULE_VERSION_ID}=ANY($5::text[]))
+        AND (NOT $6::boolean OR f.file_label IS NOT NULL OR EXISTS (
+            SELECT 1 FROM range_annotations a WHERE a.pair_id=f.id
+        ))
         ORDER BY tr.trace_id,r.id
     """
     async with request_db(request, readonly=True) as conn:
-        cursor = await conn.cursor(query, key_id, project, rule, trace_id, rule_version)
+        cursor = await conn.cursor(
+            query, key_id, project, rule, trace_id, rule_version, annotated_only
+        )
         while rows := await cursor.fetch(100):
             ranges = await review_ranges(conn, list({row["run_id"] for row in rows}))
             for row in rows:
@@ -751,7 +758,7 @@ async def all_training_records(request, key_id, project, rule, trace_id, rule_ve
 
 @router.get("/export/{kind}")
 async def export(
-    kind: Literal["files", "adjudication", "ranges", "all"],
+    kind: Literal["files", "adjudication", "ranges", "all", "annotated"],
     request: Request,
     key_id: int | None = None,
     project: str | None = None,
@@ -836,8 +843,10 @@ async def export(
                         )
 
     return StreamingResponse(
-        all_training_records(request, key_id, project, rule, trace_id, rule_version)
-        if kind == "all"
+        training_records(
+            request, key_id, project, rule, trace_id, rule_version, kind == "annotated"
+        )
+        if kind in {"all", "annotated"}
         else records(),
         media_type="application/x-ndjson",
         headers={"Content-Disposition": f'attachment; filename="nllint-{kind}.jsonl"'},

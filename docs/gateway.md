@@ -29,6 +29,8 @@ The gateway retains submitted source and rule text in Postgres for review and ex
 
 Choose **All lint data** in the JSONL export menu to download one record per trace and rule. It includes source, rule text, prompt, model decisions and confidence, candidate ranges, and any human labels. An unset human label is `null`. The export respects the project, API key, rule, and trace scope. Open **All traces** and clear those filters to export across projects.
 
+Choose **All annotated data** for the same format restricted to records with a human file decision or at least one human range label. Unlabeled ranges on those records are included as context with a `null` annotation.
+
 
 ## Projects and API keys
 

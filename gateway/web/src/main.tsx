@@ -306,9 +306,9 @@ function Workspace({api, logout, section, project, traceId, models}: {
       if (traceId) params.set('trace_id', traceId);
       const link = document.createElement('a');
       const path = `/export/${exportKind}?${params}`;
-      if (exportKind === 'all') {
+      if (exportKind === 'all' || exportKind === 'annotated') {
         link.href = '/api' + path;
-        link.download = 'nllint-all.jsonl';
+        link.download = `nllint-${exportKind}.jsonl`;
         link.click();
         return;
       }
@@ -368,6 +368,7 @@ function Workspace({api, logout, section, project, traceId, models}: {
                 <option value="files">File decisions</option>
                 <option value="ranges">Range examples</option>
                 <option value="adjudication">Adjudication examples</option>
+                <option value="annotated">All annotated data</option>
                 <option value="all">All lint data</option>
               </select>
               <button type="button" onClick={download}>Export JSONL</button>

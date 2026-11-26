@@ -151,6 +151,10 @@ class GatewayTest(unittest.TestCase):
             self.assertIsNone(positive["ranges"][0]["annotation"])
             self.assertFalse(negative["questions"][0]["decision"])
             self.assertEqual(negative["ranges"], [])
+            self.assertEqual(
+                client.get("/api/export/annotated", params={"trace_id": trace_id}).text,
+                "",
+            )
             self.assertEqual(first["ranges"][0]["preview"], "b\nc")
             self.assertEqual(ready[1]["ranges"], [])
             for issue in ("file-range-positives", "adjudicated-positives"):
@@ -266,6 +270,11 @@ class GatewayTest(unittest.TestCase):
             self.assertEqual(
                 self.wait(client, key, trace_id)[1]["ranges"][0]["start"], 2
             )
+            labeled_file = self.json(
+                client.get("/api/export/annotated", params={"trace_id": trace_id})
+            )
+            self.assertEqual(labeled_file["rule_id"], second["rule_id"])
+            self.assertTrue(labeled_file["file_label"])
             self.json(
                 client.put(
                     f"/api/pairs/{second['pair_id']}/range",
@@ -289,6 +298,12 @@ class GatewayTest(unittest.TestCase):
                     region["annotation"] and not region["candidate"]
                     for region in annotated["ranges"]
                 )
+            )
+            self.assertEqual(
+                self.json(
+                    client.get("/api/export/annotated", params={"trace_id": trace_id})
+                ),
+                annotated,
             )
             self.assertIn(
                 '"coverage": "reviewed-positives"',
