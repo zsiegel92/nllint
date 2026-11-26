@@ -1,3 +1,4 @@
+import type {Selection} from './evaluation';
 import {AgentResults} from './agentic';
 import {useEffect, useMemo, useState} from 'react';
 import * as ToggleGroup from '@radix-ui/react-toggle-group';
@@ -7,10 +8,10 @@ import {CodeBlock, highlightLines, languageForPath} from './code';
 import type {Language} from './code';
 import {findRangesPath, rangeParam} from './navigation';
 import {ReviewStages} from './stage-selector';
-import {LabelButtons, RangeLink, rangeStatus, SourceReview} from './source-review';
+import {AnnotationVerdict, LabelButtons, RangeLink, rangeStatus, SourceReview} from './source-review';
 import type {SaveRange} from './source-review';
 import {Api, attribution, label, probability} from './api';
-import type {Cell, History, Label, Mode, ProviderHistory, Range, ReviewMode, Run, Trace} from './api';
+import type {AnnotationEvent, Cell, History, Label, Mode, ProviderHistory, Range, ReviewMode, Run, Trace} from './api';
 
 function Verdict({decision, confidence}: {decision: Label; confidence?: number | null}) {
   return <span className={`badge ${decision === null ? 'neutral' : decision ? 'violation' : 'clear'}`}>
@@ -58,16 +59,17 @@ function RangeStageCard({trace, cell, adjudicated, open, language}: {
     {discoveryEmpty && <small>No candidate ranges</small>}
     {ranges.map(range => <div className="stage-range" key={rangeParam(range)}>
       <RangeLink range={range} cell={cell} onClick={() => open(trace, cell, 'ranges', range)}/>
-      <small>{adjudicated || !range.candidate ? rangeStatus(range) : 'Candidate range'}
-        {(adjudicated || !range.candidate) && range.annotation !== null ? ` · ${attribution(range.labeler_identity)}: ${label(range.annotation)}` : ''}</small>
+      <small>{adjudicated || !range.candidate ? rangeStatus(range) : 'Candidate range'}</small>
+      {(adjudicated || !range.candidate) && <AnnotationVerdict identity={range.labeler_identity} decision={range.annotation}/>}
       {adjudicated && range.preview && <CodeBlock source={range.preview} language={language}/>}
     </div>)}
   </section>;
 }
 
-export function Matrix({traces, stages, open, openFile, onRule, languages, traceLink, selectedRules, runAgent, agentBusy}: {
+export function Matrix({traces, stages, open, openFile, onRule, languages, traceLink, selectedRules, runAgent, agentBusy, selected, onSelect, compareLink}: {
   traces: Trace[]; stages: Mode[]; open: OpenReview; openFile: (trace: Trace) => void;
   languages: Partial<Record<string, Language>>; traceLink: (trace: Trace) => string;
+  selected: Set<string>; onSelect: (item: Selection) => void; compareLink: (trace: Trace) => string;
   runAgent?: (ids: number[]) => void; agentBusy: boolean;
   onRule: (version: string) => void; selectedRules: string[];
 }) {
@@ -89,6 +91,7 @@ export function Matrix({traces, stages, open, openFile, onRule, languages, trace
         <button type="button" className="text-button" aria-label={`View file ${trace.file_path}`}
           onClick={() => openFile(trace)}>View file</button>
         {runAgent && <button type="button" disabled={agentBusy} onClick={() => runAgent([...new Set(trace.cells.map(cell => cell.run_id))])}>Label all file rules</button>}
+        <Link className="text-button" to={compareLink(trace)}>Compare revisions</Link>
         <small>{trace.project} · {trace.key_name}</small>
         <small>Score {trace.score} · {new Date(trace.created_at).toLocaleString()}</small>
       </th>
@@ -97,13 +100,17 @@ export function Matrix({traces, stages, open, openFile, onRule, languages, trace
         if (!cell) return <td key={column.rule_version} className="void-cell">—</td>;
         const language = languages[trace.id] ?? languageForPath(trace.file_path);
         return <td key={column.rule_version}>
+          <label className="trace-selection"><input type="checkbox"
+            checked={selected.has(`${trace.id}:${cell.run_id}`)}
+            onChange={() => onSelect({trace_id: trace.id, run_id: cell.run_id})}/>
+            Select <span className="sr-only">{cell.rule_id} for {trace.file_path}</span></label>
           {stages.includes('files') && <section className="stage-card">
-            <div className="stage-card-heading"><strong>Pipeline · File</strong>
+            <div className="stage-card-heading"><strong>File decision</strong>
               <button type="button" className="icon-action" aria-label={`Review file decision for ${cell.rule_id}`}
                 onClick={() => open(trace, cell, 'files')}><Pencil size={14} aria-hidden="true"/></button></div>
-            <FileVerdict cell={cell}/>
-            {cell.file_label !== null && <small>{attribution(cell.labeler_identity)} · {label(cell.file_label)}</small>}
+            <span className="pipeline-verdict"><small>Pipeline</small><FileVerdict cell={cell}/></span>
           </section>}
+          {stages.includes('files') && <AnnotationVerdict identity={cell.labeler_identity} decision={cell.file_label}/>}
           {stages.includes('ranges') && <RangeStageCard trace={trace} cell={cell} language={language} open={open}/>}
           {stages.includes('adjudication') && <RangeStageCard trace={trace} cell={cell} language={language} open={open} adjudicated/>}
           <AgentResults cell={cell} open={range => open(trace, cell, 'ranges', range)}/>
@@ -135,7 +142,7 @@ function ProviderRequestList({history}: {history: ProviderHistory}) {
   </section>;
 }
 
-const ruleDetailLabels = {definition: 'Rule', history: 'Rule history', provider: 'Provider requests'} as const;
+const ruleDetailLabels = {definition: 'Rule', history: 'Rule history', provider: 'Provider requests', annotations: 'Annotation history'} as const;
 type RuleDetail = keyof typeof ruleDetailLabels;
 
 function RuleDetails({api, trace, cell, tab, refresh}: {api: Api; trace: Trace; cell: Cell; tab: RuleDetail; refresh: () => void}) {
@@ -143,8 +150,10 @@ function RuleDetails({api, trace, cell, tab, refresh}: {api: Api; trace: Trace; 
   const [error, setError] = useState('');
   const [history, setHistory] = useState<History[]>();
   const [provider, setProvider] = useState<ProviderHistory>();
+  const [events, setEvents] = useState<{events: AnnotationEvent[]; more: boolean}>();
+  const [eventPage, setEventPage] = useState(0);
   useEffect(() => {
-    if (tab === 'history') return;
+    if (tab === 'history' || tab === 'annotations') return;
     let active = true;
     api.json<Run>(`/runs/${cell.run_id}`).then(result => {if (active) setRun(result);})
       .catch(error => {if (active) setError(error.message);});
@@ -157,13 +166,17 @@ function RuleDetails({api, trace, cell, tab, refresh}: {api: Api; trace: Trace; 
       api.json<History[]>(`/history?${new URLSearchParams({project_id: String(trace.project_id), rule: cell.rule_path})}`)
         .then(result => {if (active) setHistory(result);})
         .catch(error => {if (active) setError(error.message);});
+    } else if (tab === 'annotations') {
+      api.json<{events: AnnotationEvent[]; more: boolean}>(`/pairs/${cell.pair_id}/history?offset=${eventPage * 30}`)
+        .then(result => {if (active) setEvents(result);})
+        .catch(error => {if (active) setError(error.message);});
     } else if (tab === 'provider') {
       api.json<ProviderHistory>(`/runs/${cell.run_id}/provider-requests`)
         .then(result => {if (active) setProvider(result);})
         .catch(error => {if (active) setError(error.message);});
     }
     return () => {active = false;};
-  }, [api, cell.run_id, cell.rule_path, tab, trace.project_id]);
+  }, [api, cell.run_id, cell.rule_path, cell.pair_id, eventPage, tab, trace.project_id]);
 
   const otherVersions = history?.filter(item => item.rule_hash !== cell.rule_hash);
   return <div className="rule-card-content">
@@ -178,6 +191,14 @@ function RuleDetails({api, trace, cell, tab, refresh}: {api: Api; trace: Trace; 
         <CodeBlock source={item.rule} language="markdown"/>
       </details>) : <p className="muted">Only the current version is recorded.</p>)
       : <p role="status">Loading rule history…</p>)}
+    {tab === 'annotations' && (events ? <section>
+      {events.events.length ? <ul>{events.events.map(event => <li key={event.id}>
+        {event.start === null ? 'File' : `L${event.start}–${event.end}`} · {event.decision === null ? 'Cleared' : label(event.decision)} · {attribution(event.labeler_identity, true)}
+        <small> {new Date(event.created_at).toLocaleString()}</small>
+      </li>)}</ul> : <p>No annotation changes recorded yet.</p>}
+      {eventPage > 0 && <button type="button" onClick={() => setEventPage(eventPage - 1)}>Newer edits</button>}
+      {events.more && <button type="button" onClick={() => setEventPage(eventPage + 1)}>Older edits</button>}
+    </section> : <p role="status">Loading annotation history…</p>)}
     {tab === 'provider' && (provider ? <ProviderRequestList history={provider}/> : <p role="status">Loading requests…</p>)}
   </div>;
 }
@@ -191,8 +212,8 @@ function RuleCard({api, trace, cell, focused, canAnnotate, saveFile, busy, refre
     <div className="review-rule-header">
       <div className="review-rule-summary">
         <span className="review-rule-name"><strong>{cell.rule_id}</strong><small>{cell.rule_path}</small></span>
-        <span>Pipeline <FileVerdict cell={cell}/></span>
-        {cell.file_label !== null && <small>{attribution(cell.labeler_identity)} · {label(cell.file_label)}</small>}
+        <span className="pipeline-verdict"><small>Pipeline</small><FileVerdict cell={cell}/></span>
+        <AnnotationVerdict identity={cell.labeler_identity} decision={cell.file_label}/>
         {canAnnotate && <LabelButtons active={cell.file_label} disabled={busy} save={decision => saveFile(cell, decision)}/>}
       </div>
       <ToggleGroup.Root className="rule-detail-pills" type="single" value={tab}

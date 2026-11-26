@@ -1,9 +1,10 @@
-export type Identity = {type: 'HUMAN' | 'BOT'; origin: string; name?: string; model?: string; user_id?: number};
-export type Labeler = {id: number; name: string; model: string; max_tool_calls: number};
+export type Identity = {type: 'HUMAN' | 'BOT'; origin: string; invoked_via?: string; configured_via?: string; harness_version?: string; name?: string; model?: string; user_id?: number};
+export type Labeler = {id: number; name: string; model: string; max_tool_calls: number; instructions: string; configured_via: string | null};
 export type AgentLabel = {labeler_id: number; violates: boolean; labeler_identity: Identity; ranges: {start: number; end: number}[]};
-export const attribution = (identity: Identity | null) => identity?.type === 'BOT'
-  ? `Bot${identity.name || identity.model ? ` · ${identity.name || identity.model}` : ''}`
-  : identity?.origin === 'webapp' ? 'Human · web'
+export const attribution = (identity: Identity | null, showChannel = false) => identity?.type === 'BOT'
+  ? `${identity.origin === 'mcp' ? 'MCP bot' : identity.origin === 'api' ? 'API bot' : 'Bot'}${identity.name || identity.model ? ` · ${identity.name || identity.model}` : ''}`
+  : identity?.type === 'HUMAN' && !showChannel ? 'Human'
+  : identity?.origin === 'webapp' ? 'Human · browser'
   : identity?.origin === 'ide' ? 'Human · IDE'
   : identity?.type === 'HUMAN' ? 'Human · API' : 'Legacy annotation';
 export type Label = boolean | null;
@@ -55,6 +56,7 @@ export type Trace = {
   project: string;
   project_id: number;
   key_name: string;
+  key_id: number;
   created_at: string;
   score: number;
   matching_run_ids: number[];
@@ -120,3 +122,5 @@ export const label = (decision: Label) => decision === null ? 'Unreviewed' : dec
 export const rangeText = (range: {start: number; end: number}) =>
   range.start === range.end ? `L${range.start}` : `L${range.start}–${range.end}`;
 export const probability = (confidence: number | null) => confidence === null ? '' : `${Math.round(confidence * 100)}%`;
+
+export type AnnotationEvent = {id: number; start: number | null; end: number | null; decision: Label; labeler_identity: Identity; created_at: string};

@@ -8,13 +8,14 @@ export function LabelerSettings({api, items, refresh, onError}: {
 }) {
   const [name, setName] = useState('');
   const [model, setModel] = useState('');
+  const [instructions, setInstructions] = useState('');
   const [calls, setCalls] = useState(4);
   const [saving, setSaving] = useState(false);
   async function save(event: FormEvent) {
     event.preventDefault();
     setSaving(true);
     try {
-      await api.json('/agentic-labelers', 'POST', {name: name.trim(), model: model.trim(), max_tool_calls: calls});
+      await api.json('/agentic-labelers', 'POST', {name: name.trim(), model: model.trim(), max_tool_calls: calls, instructions});
       refresh();
     } catch (error) {
       onError((error as Error).message);
@@ -31,12 +32,14 @@ export function LabelerSettings({api, items, refresh, onError}: {
         onChange={event => setModel(event.target.value)}/></label>
       <label>Maximum tool calls<input type="number" min={0} max={12} required value={calls}
         onChange={event => setCalls(event.target.valueAsNumber)}/></label>
+      <label>Reviewer instructions<textarea value={instructions} maxLength={8000}
+        onChange={event => setInstructions(event.target.value)}/></label>
       <button className="primary" disabled={saving || !name.trim() || !model.trim()}>Save labeler</button>
     </form>
-    <table><thead><tr><th>Name</th><th>Model</th><th>Tool calls</th><th/></tr></thead>
+    <table><thead><tr><th>Name</th><th>Model</th><th>Tool calls</th><th>Configured via</th><th/></tr></thead>
       <tbody>{items.map(item => <tr key={item.id}>
-        <td>{item.name}</td><td>{item.model}</td><td>{item.max_tool_calls}</td>
-        <td><button type="button" onClick={() => {setName(item.name); setModel(item.model); setCalls(item.max_tool_calls);}}>Edit</button></td>
+        <td>{item.name}</td><td>{item.model}</td><td>{item.max_tool_calls}</td><td>{item.configured_via ?? 'Legacy'}</td>
+        <td><button type="button" onClick={() => {setName(item.name); setModel(item.model); setCalls(item.max_tool_calls); setInstructions(item.instructions);}}>Edit</button></td>
       </tr>)}</tbody>
     </table>
   </>;
@@ -56,6 +59,7 @@ export function AgentResults({cell, open}: {cell: Cell; open?: (range: Range) =>
   return cell.agentic_labels.map(agent => <section className="stage-card agent-result" key={agent.labeler_id}>
     <strong>Agent · {agent.labeler_identity.name}</strong>
     <small>{label(agent.violates)} · {agent.labeler_identity.model}</small>
+    {agent.labeler_identity.invoked_via && <small>Gateway agent · requested via {agent.labeler_identity.invoked_via}</small>}
     <div>{ranges.filter(range => range.agent?.id === agent.labeler_id).map(range =>
       open ? <button key={range.start} className="range-link" type="button" onClick={() => open(range)}>{rangeText(range)}</button>
         : <small key={range.start}>{rangeText(range)}</small>

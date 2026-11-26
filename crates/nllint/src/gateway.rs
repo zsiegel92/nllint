@@ -35,6 +35,8 @@ type PairIdentity = [String; 5];
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct SyncState {
     pub version: String,
+    #[serde(default)]
+    pub pair_ids: Option<bool>,
     cursor: i64,
     #[serde(default)]
     fetched: u64,
@@ -157,7 +159,10 @@ impl Gateway {
             .flatten()
             .unwrap_or_default();
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        if !state.version.is_empty() && now.saturating_sub(state.fetched) < interval {
+        if !state.version.is_empty()
+            && state.pair_ids.is_some()
+            && now.saturating_sub(state.fetched) < interval
+        {
             return Ok(state);
         }
         let delta: SyncState = match self
@@ -178,6 +183,7 @@ impl Gateway {
             state.changes.clear();
         }
         state.version = delta.version;
+        state.pair_ids = Some(delta.pair_ids.unwrap_or(false));
         state.cursor = delta.cursor;
         state.changes.extend(delta.changes);
         state.changes.sort_by(|left, right| {

@@ -29,7 +29,7 @@ SESSION_SECONDS = 12 * 60 * 60
 @dataclass(frozen=True)
 class Principal:
     user_id: int
-    origin: Literal["api", "webapp", "ide"]
+    origin: Literal["api", "webapp", "ide", "mcp"]
     key_id: int | None = None
 
 
@@ -211,6 +211,7 @@ async def github_start(request: Request):
         "/pipelines",
         "/api-keys",
         "/agentic-labelers",
+        "/eval-sets",
     } and not path.startswith(("/traces/", "/pipelines/", "/find-ranges/")):
         destination = "/"
     callback_host = urlsplit(settings.nllint_app_url).hostname

@@ -5,7 +5,7 @@ import {ArrowLeft, ArrowRight, Eye} from 'lucide-react';
 import {CodeTokens, SourceHeader} from './code';
 import type {HighlightedLine, Language} from './code';
 import {attribution, label, rangeText} from './api';
-import type {Cell, Label, Range} from './api';
+import type {Identity, Cell, Label, Range} from './api';
 import {rangeParam} from './navigation';
 
 export type Bounds = Pick<Range, 'start' | 'end'>;
@@ -61,10 +61,19 @@ function colorStyle(color: string, column?: number): CSSProperties & {'--rule-co
   return {'--rule-color': color, gridColumn: column};
 }
 
+export function AnnotationVerdict({identity, decision}: {identity: Identity | null; decision: Label}) {
+  if (decision === null) return null;
+  return <span className="annotation-verdict">
+    <span>{attribution(identity)}</span>
+    <strong>{label(decision)}</strong>
+  </span>;
+}
+
 function RangeControls({marker, save, busy}: {marker: Marker; save: SaveRange; busy: boolean}) {
   return <>
     <strong>{marker.cell.rule_id} · {rangeText(marker.range)}</strong>
-    <small>{rangeStatus(marker.range)}{marker.range.annotation !== null ? ` · ${attribution(marker.range.labeler_identity)}: ${label(marker.range.annotation)}` : ''}</small>
+    <small>{rangeStatus(marker.range)}</small>
+    <AnnotationVerdict identity={marker.range.labeler_identity} decision={marker.range.annotation}/>
     <LabelButtons active={marker.range.annotation} disabled={busy}
       save={decision => save(marker.cell, marker.range, decision)}/>
   </>;

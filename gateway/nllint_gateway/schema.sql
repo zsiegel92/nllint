@@ -234,6 +234,40 @@ CREATE TABLE IF NOT EXISTS agentic_labels (
     FOREIGN KEY (user_id,labeler_id) REFERENCES agentic_labelers(user_id,id)
 );
 
+ALTER TABLE agentic_labelers ADD COLUMN IF NOT EXISTS instructions text NOT NULL DEFAULT '';
+ALTER TABLE agentic_labelers ADD COLUMN IF NOT EXISTS configured_via text;
+
+CREATE TABLE IF NOT EXISTS annotation_history (
+    user_id bigint NOT NULL DEFAULT nllint_user_id() REFERENCES users(id),
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    pair_id bigint NOT NULL,
+    start_line integer,
+    end_line integer,
+    decision boolean,
+    labeler_identity jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    FOREIGN KEY (user_id,pair_id) REFERENCES file_rules(user_id,id)
+);
+CREATE INDEX IF NOT EXISTS annotation_history_pair ON annotation_history (pair_id,id DESC);
+
+CREATE TABLE IF NOT EXISTS eval_sets (
+    user_id bigint NOT NULL DEFAULT nllint_user_id() REFERENCES users(id),
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (user_id,id),
+    UNIQUE (user_id,name)
+);
+CREATE TABLE IF NOT EXISTS eval_examples (
+    user_id bigint NOT NULL DEFAULT nllint_user_id() REFERENCES users(id),
+    set_id bigint NOT NULL,
+    run_id bigint NOT NULL,
+    reference jsonb NOT NULL,
+    PRIMARY KEY (set_id,run_id),
+    FOREIGN KEY (user_id,set_id) REFERENCES eval_sets(user_id,id),
+    FOREIGN KEY (user_id,run_id) REFERENCES runs(user_id,id)
+);
+
 -- These tables contain control-plane indexes only and are readable through the functions below.
 CREATE TABLE IF NOT EXISTS api_key_directory (
     digest text PRIMARY KEY,
@@ -312,7 +346,8 @@ BEGIN
     FOREACH relation IN ARRAY ARRAY[
         'projects','api_keys','streams','texts','file_rules','traces','provider_versions',
         'runs','trace_runs','questions','range_candidates','range_annotations',
-        'provider_requests','provider_request_results','agentic_labelers','agentic_labels'
+        'provider_requests','provider_request_results','agentic_labelers','agentic_labels',
+        'annotation_history','eval_sets','eval_examples'
     ] LOOP
         EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', relation);
         EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', relation);
@@ -324,7 +359,8 @@ BEGIN
         EXECUTE format('GRANT SELECT, INSERT, UPDATE ON public.%I TO nllint_runtime', relation);
     END LOOP;
 END $$;
-GRANT USAGE ON SEQUENCE agentic_labelers_id_seq TO nllint_runtime;
+GRANT USAGE ON SEQUENCE agentic_labelers_id_seq, annotation_history_id_seq, eval_sets_id_seq TO nllint_runtime;
+REVOKE UPDATE ON annotation_history, eval_sets, eval_examples FROM nllint_runtime;
 GRANT DELETE ON range_annotations TO nllint_runtime;
 GRANT USAGE ON SEQUENCE projects_id_seq, api_keys_id_seq, file_rules_id_seq,
     provider_versions_id_seq, runs_id_seq, provider_requests_id_seq TO nllint_runtime;

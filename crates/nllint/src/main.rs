@@ -1,6 +1,7 @@
 mod gateway_process;
 
 use std::{
+    collections::BTreeSet,
     ffi::OsStr,
     fs::OpenOptions,
     io::Write,
@@ -28,6 +29,9 @@ struct Cli {
     include_git_ignored: bool,
     #[arg(long)]
     dry_run: bool,
+    /// Check only this project-relative file. Repeat to check an evaluation set.
+    #[arg(long = "file", value_name = "PATH")]
+    paths: Vec<PathBuf>,
     /// Print a one-shot check as structured JSON instead of human-readable text.
     #[arg(long)]
     json: bool,
@@ -97,6 +101,10 @@ async fn run() -> anyhow::Result<i32> {
             None => config::discover(&std::env::current_dir()?).await?,
         },
     };
+    ensure!(
+        cli.paths.is_empty() || cli.command.is_none(),
+        "--file is only valid for one-shot checks"
+    );
     match cli.command {
         Some(Command::Serve { detach }) => gateway_process::serve(detach).await,
         Some(Command::Stop) => gateway_process::stop().await,
@@ -159,6 +167,7 @@ async fn run() -> anyhow::Result<i32> {
         }
         None => {
             let Some(config_path) = config_path else {
+                ensure!(cli.paths.is_empty(), "--file requires project settings");
                 if cli.json {
                     println!(
                         "{}",
@@ -176,6 +185,7 @@ async fn run() -> anyhow::Result<i32> {
                 cli.json,
                 cli.stream,
                 cli.force_fresh,
+                cli.paths,
             )
             .await
         }
@@ -277,6 +287,7 @@ async fn check(
     json: bool,
     stream: bool,
     force_fresh: bool,
+    paths: Vec<PathBuf>,
 ) -> anyhow::Result<i32> {
     ensure!(!dry_run || !json, "--dry-run and --json cannot be combined");
     ensure!(
@@ -290,8 +301,19 @@ async fn check(
     );
     let (root, mut config) = config::load_project(&config_path).await?;
     config.include_git_ignored |= include_git_ignored;
+    let mut selected = files::discover(&root, &config)?;
+    if !paths.is_empty() {
+        let requested: BTreeSet<_> = paths.into_iter().collect();
+        for path in &requested {
+            ensure!(
+                selected.binary_search(path).is_ok(),
+                "--file {} is not selected by the project settings",
+                path.display()
+            );
+        }
+        selected.retain(|path| requested.contains(path));
+    }
     if dry_run {
-        let selected = files::discover(&root, &config)?;
         println!("nllint: would lint {} files", selected.len());
         for path in selected {
             println!("{}", path.display());
@@ -306,7 +328,7 @@ async fn check(
     let engine = Engine::new(root, config, provider);
     let result = if stream {
         engine
-            .run_with_progress(|file| {
+            .run_files_with_progress(selected, |file| {
                 let stdout = std::io::stdout();
                 let mut output = stdout.lock();
                 report::print_violations(&file.violations, &mut output)?;
@@ -315,7 +337,7 @@ async fn check(
             })
             .await?
     } else {
-        engine.run().await?
+        engine.run_files(selected).await?
     };
     if json {
         println!("{}", serde_json::to_string(&result)?);

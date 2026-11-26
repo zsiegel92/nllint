@@ -7,11 +7,11 @@ The extension starts one `nllint watch --stream` process per configured project 
 From the NLLint checkout run:
 
 ```sh
-./install-to-path.sh
-./ide-extension/install.sh
+make cli-install
+make ide-install
 ```
 
-The extension installer checks and builds the code, packages `nllint-vscode.vsix`, and installs it using `code`. Set `CODE_BIN` for another compatible VS Code CLI. For SSH or a dev container, install and configure NLLint where the workspace extension host runs.
+`make ide-install` checks and builds the code, packages `nllint-vscode.vsix`, and force-reinstalls it using `code`. Run **Developer: Reload Window** in VS Code if the updated extension is already loaded. Set `CODE_BIN` for another compatible VS Code CLI. For SSH or a dev container, install and configure NLLint where the workspace extension host runs.
 
 ## Configure
 

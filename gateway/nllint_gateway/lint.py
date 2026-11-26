@@ -249,6 +249,7 @@ async def sync(
     return {
         "version": version,
         "cursor": current,
+        "pair_ids": True,
         "changes": [
             {
                 "identity": identity(row),

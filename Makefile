@@ -15,7 +15,7 @@ UVICORN = $(GATEWAY_RUN) uvicorn nllint_gateway.main:app --host $(API_HOST) --po
 VITE = npm --prefix gateway/web run dev -- --host 127.0.0.1 --port $(WEB_PORT) --strictPort
 
 .PHONY: help dev api-dev web-dev serve web-install web-build modal-serve modal-api deploy deploy-api worker
-.PHONY: db-migrate db-check daemon-start daemon-stop daemon-restart cli-build cli-release cli-install cli-run cli-watch ide-package skill-install check test
+.PHONY: db-migrate db-check daemon-start daemon-stop daemon-restart cli-build cli-release cli-install cli-run cli-watch ide-package ide-install skill-install check test
 
 help: ## List commands and their configurable arguments
 	@awk 'BEGIN { FS = ":.*## " } /^##@ / { print "\n" substr($$0, 5) } /^[a-z][a-z-]*:.*## / { printf "  %-16s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -99,6 +99,9 @@ cli-watch: ## Run the CLI watcher with ARGS
 ##@ Integrations and checks
 ide-package: ## Build the VS Code extension package
 	cd ide-extension && pnpm install --frozen-lockfile && pnpm package
+
+ide-install: ## Build and reinstall the VS Code extension
+	./ide-extension/install.sh
 
 skill-install: ## Install the NLLint agent skill
 	./install-skill.sh

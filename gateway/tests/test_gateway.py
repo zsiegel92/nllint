@@ -292,6 +292,7 @@ class GatewayTest(unittest.TestCase):
             since = self.json(
                 client.get("/v1/sync", headers=key, params={"project": "demo"})
             )
+            self.assertTrue(since["pair_ids"])
             self.assertTrue(since["changes"][0]["has_violation"])
             self.assertIn('"snippet": "d"', client.get("/api/export/adjudication").text)
             response = client.get(
@@ -377,23 +378,38 @@ class GatewayTest(unittest.TestCase):
                 run["ranges"][0]["labeler_identity"],
                 {
                     "type": "BOT",
-                    "origin": "api",
+                    "origin": "mcp",
                     "model": "example/reviewer",
+                    "key_id": key_id,
                 },
             )
 
-            labeler = self.json(
-                client.post(
-                    "/api/agentic-labelers",
-                    headers=UI,
-                    json={
+            def mcp_tool(name, arguments):
+                reply = self.json(
+                    client.post(
+                        "/mcp",
+                        headers=mcp_headers,
+                        json={
+                            **mcp_request,
+                            "params": {"name": name, "arguments": arguments},
+                        },
+                    )
+                )["result"]
+                self.assertFalse(reply.get("isError"), reply)
+                return reply["structuredContent"]
+
+            labeler = mcp_tool(
+                "configure_labeler",
+                {
+                    "config": {
                         "name": "Test labeler",
                         "model": "example/reasoning",
                         "max_tool_calls": 1,
-                    },
-                ),
-                201,
+                        "instructions": "Review parser contracts.",
+                    }
+                },
             )
+            self.assertEqual(labeler["configured_via"], "mcp")
 
             def mock_agent(messages, info):
                 if info.function_tools:
@@ -434,15 +450,207 @@ class GatewayTest(unittest.TestCase):
                 "nllint_gateway.agentic.OpenRouterModel",
                 return_value=FunctionModel(mock_agent),
             ):
-                agentic = self.json(
-                    client.post(
-                        f"/api/runs/{first['run_id']}/agentic-label",
-                        headers=UI,
-                        json={"labeler_id": labeler["id"]},
-                    )
+                agentic = mcp_tool(
+                    "label_run",
+                    {"run_id": first["run_id"], "labeler_id": labeler["id"]},
                 )
             self.assertTrue(agentic["violates"])
-            self.assertEqual(agentic["labeler_identity"]["harness_version"], "1")
+            self.assertEqual(agentic["labeler_identity"]["harness_version"], "2")
+            self.assertEqual(agentic["labeler_identity"]["origin"], "agentic")
+            self.assertEqual(agentic["labeler_identity"]["invoked_via"], "mcp")
+            summary = mcp_tool(
+                "search_traces", {"query": {"trace_id": trace_id, "summary_only": True}}
+            )
+            agent_summary = summary["traces"][0]["cells"][0]["agentic_labels"][0]
+            self.assertEqual(agent_summary["range_count"], 1)
+            self.assertEqual(agent_summary["ranges"], [])
+            self.assertNotIn("instructions", agent_summary["labeler_identity"])
+
+            dataset = mcp_tool(
+                "create_eval_set",
+                {
+                    "dataset": {
+                        "name": "parser-calibration",
+                        "examples": [
+                            {"run_id": first["run_id"], "labeler_id": labeler["id"]},
+                            {"run_id": renamed_run, "ranges": []},
+                        ],
+                    }
+                },
+            )
+            baseline = mcp_tool(
+                "score_eval_set",
+                {
+                    "set_id": dataset["id"],
+                    "query": {
+                        "rule_version": first["rule_version"],
+                        "threshold": 0.8,
+                    },
+                },
+            )
+            self.assertEqual(
+                baseline["file_counts"],
+                {
+                    "tp": 1,
+                    "fp": 1,
+                    "tn": 0,
+                    "fn": 0,
+                    "failed": 0,
+                    "incomplete": 0,
+                    "missing": 0,
+                },
+            )
+            self.assertEqual(
+                baseline["exact_range_counts"], {"tp": 0, "fp": 2, "fn": 1}
+            )
+            revised = {
+                **data,
+                "rules": [
+                    {**data["rules"][0], "text": "Check a stricter marker."},
+                    data["rules"][1],
+                ],
+            }
+            revised_id = self.submit(client, key, revised)
+            self.wait(client, key, revised_id)
+            revised_view = self.json(client.get(f"/api/traces?trace_id={revised_id}"))[
+                "traces"
+            ][0]
+            candidate_version = revised_view["cells"][0]["rule_version"]
+            partial = mcp_tool(
+                "score_eval_set",
+                {
+                    "set_id": dataset["id"],
+                    "query": {
+                        "rule_version": candidate_version,
+                    },
+                },
+            )
+            self.assertEqual(partial["file_counts"]["missing"], 1)
+            revised_renamed_id = self.submit(
+                client, key, {**revised, "path": "renamed.py"}
+            )
+            self.wait(client, key, revised_renamed_id)
+            improved = mcp_tool(
+                "score_eval_set",
+                {
+                    "set_id": dataset["id"],
+                    "query": {
+                        "rule_version": candidate_version,
+                    },
+                },
+            )
+            self.assertEqual(improved["file_counts"]["missing"], 0)
+            self.assertEqual(improved["file_counts"]["fn"], 1)
+            self.assertEqual(improved["file_counts"]["tn"], 1)
+            self.assertEqual(improved["examples"][0]["path"], "a.py")
+
+            examples = mcp_tool(
+                "list_eval_examples", {"set_id": dataset["id"], "limit": 1}
+            )
+            self.assertTrue(examples["more"])
+            self.assertEqual(examples["examples"][0]["reference"]["file_path"], "a.py")
+            self.assertNotIn("source", examples["examples"][0])
+
+            peer = mcp_tool(
+                "configure_labeler",
+                {
+                    "config": {
+                        "name": "Second opinion",
+                        "model": "example/other",
+                        "max_tool_calls": 0,
+                    }
+                },
+            )
+
+            def clean_agent(_, info):
+                self.assertFalse(info.function_tools)
+                return ModelResponse(
+                    parts=[ToolCallPart(info.output_tools[0].name, {"ranges": []})]
+                )
+
+            with patch(
+                "nllint_gateway.agentic.OpenRouterModel",
+                return_value=FunctionModel(clean_agent),
+            ):
+                batch = mcp_tool(
+                    "label_runs",
+                    {
+                        "run_ids": [first["run_id"], renamed_run],
+                        "labeler_id": peer["id"],
+                    },
+                )
+            self.assertEqual(
+                [row["violates"] for row in batch["results"]], [False, False]
+            )
+            peer_conflict = self.json(
+                client.get(
+                    "/api/traces",
+                    params={
+                        "trace_id": trace_id,
+                        "issue": "agent-agent-disagreements",
+                        "sort": "disagreement",
+                        "agent_labeler_id": labeler["id"],
+                        "peer_labeler_id": peer["id"],
+                    },
+                )
+            )
+            self.assertEqual(
+                peer_conflict["traces"][0]["matching_run_ids"], [first["run_id"]]
+            )
+            self.assertEqual(peer_conflict["traces"][0]["disagreements"], 1)
+
+            exported_set = client.get(dataset["export_path"], headers=key)
+            self.assertEqual(exported_set.status_code, 200)
+            dataset_rows = [json.loads(line) for line in exported_set.text.splitlines()]
+            self.assertEqual(
+                dataset_rows[0]["reference"]["labeler_identity"]["origin"], "agentic"
+            )
+            self.assertEqual(dataset_rows[1]["reference"]["ranges"], [])
+
+            selected = client.post(
+                "/v1/export/selection",
+                headers=key,
+                json={
+                    "selection": [{"trace_id": trace_id, "run_id": first["run_id"]}],
+                    "include_agentic": True,
+                    "include_history": True,
+                    "agent_labeler_ids": [labeler["id"]],
+                },
+            )
+            self.assertEqual(selected.status_code, 200)
+            exported_selection = json.loads(selected.text)
+            self.assertEqual(exported_selection["run_id"], first["run_id"])
+            self.assertEqual(
+                exported_selection["annotation_history"][0]["labeler_identity"][
+                    "origin"
+                ],
+                "mcp",
+            )
+            self.assertEqual(
+                exported_selection["agentic_labels"][0]["labeler_id"], labeler["id"]
+            )
+
+            pipeline_only = client.post(
+                "/v1/export/selection",
+                headers=key,
+                json={
+                    "selection": [{"trace_id": trace_id, "run_id": first["run_id"]}],
+                    "include_review": False,
+                    "include_history": True,
+                    "reviewer_origin": "human",
+                },
+            )
+            self.assertEqual(pipeline_only.status_code, 200)
+            pipeline_record = json.loads(pipeline_only.text)
+            self.assertEqual(pipeline_record["annotation_history"], [])
+            self.assertTrue(
+                all(
+                    region["candidate"] and region["annotation"] is None
+                    for region in pipeline_record["ranges"]
+                )
+            )
+            self.assertNotIn("agentic_labels", pipeline_record)
+
             disagreement = self.json(
                 client.get(
                     "/api/traces",
@@ -482,7 +690,7 @@ class GatewayTest(unittest.TestCase):
                     for region in run["ranges"]
                     if region["start"] == 2
                 ),
-                {"type": "HUMAN", "origin": "ide", "user_id": user},
+                {"type": "HUMAN", "origin": "ide", "user_id": user, "key_id": key_id},
             )
             self.assertEqual(
                 client.put(
@@ -504,7 +712,10 @@ class GatewayTest(unittest.TestCase):
                 )
             )
             run = self.json(client.get(f"/v1/runs/{first['run_id']}", headers=key))
-            self.assertEqual(run["labeler_identity"], {"type": "BOT", "origin": "api"})
+            self.assertEqual(
+                run["labeler_identity"],
+                {"type": "BOT", "origin": "api", "key_id": key_id},
+            )
 
             for decision in (False, None):
                 self.assertEqual(
@@ -660,6 +871,9 @@ class GatewayTest(unittest.TestCase):
             )
             self.assertEqual(foreign_mcp["result"]["structuredContent"]["traces"], [])
 
+            self.assertEqual(
+                client.get(dataset["export_path"], headers=other_key).status_code, 404
+            )
             self.wait(client, other_key, self.submit(client, other_key, data))
             self.assertNotEqual(
                 self.json(client.get("/api/traces"))["traces"][0]["project_id"],

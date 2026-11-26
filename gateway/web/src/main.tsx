@@ -1,3 +1,5 @@
+import {DatasetActions, EvalSets} from './evaluation';
+import type {Selection} from './evaluation';
 import {LabelerSettings} from './agentic';
 import type {Labeler} from './api';
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
@@ -72,7 +74,7 @@ function App() {
   </section></main>;
   if (matched.route.id === 'home') return <LegacyHome api={api}/>;
   if (matched.route.id === 'find') return <FindRanges api={api} run={matched.params.runId ?? ''}/>;
-  const section: Section = matched.route.id === 'labelers' ? 'labelers' : matched.route.id === 'keys' ? 'keys'
+  const section: Section = matched.route.id === 'evals' ? 'evals' : matched.route.id === 'labelers' ? 'labelers' : matched.route.id === 'keys' ? 'keys'
     : matched.route.id === 'projects' || matched.route.id === 'models' ? 'projects' : 'traces';
   return <Workspace api={api} section={section} project={matched.params.projectId ?? ''}
     traceId={matched.params.traceId} models={matched.params.pipelineId} logout={() => {
@@ -207,6 +209,7 @@ function Workspace({api, logout, section, project, traceId, models}: {
   const {mode, stages, issue, key, rule, rules, sort, exportKind} = query;
   const page = Math.max(0, query.page);
   const selectedTrace = query.reviewTrace ?? (query.run ? traceId : undefined);
+  const [selection, setSelection] = useState<Selection[]>([]);
   const [labelers, setLabelers] = useState<Labeler[]>([]);
   const agentBatch = useRef<{stop: boolean} | null>(null);
   const [agentProgress, setAgentProgress] = useState<{done: number; total: number; stopping: boolean}>();
@@ -259,6 +262,15 @@ function Workspace({api, logout, section, project, traceId, models}: {
   if (traceId) ruleScope.set('trace_id', traceId);
   const traceParams = new URLSearchParams(scope);
   traceParams.set('issue', issue);
+  if (query.pathContains.trim()) traceParams.set('path', query.pathContains.trim());
+  if (query.sourceContains.trim()) traceParams.set('source_text', query.sourceContains.trim());
+  if (query.minConfidence !== '') traceParams.set('min_confidence', query.minConfidence);
+  if (query.maxConfidence !== '') traceParams.set('max_confidence', query.maxConfidence);
+  if (query.filterAgent) traceParams.set('agent_labeler_id', String(query.filterAgent));
+  if (query.peerAgent) traceParams.set('peer_labeler_id', String(query.peerAgent));
+  if (query.reviewerOrigin) traceParams.set('reviewer_origin', query.reviewerOrigin);
+  if (query.extraIssue) traceParams.append('extra_issue', query.extraIssue);
+  traceParams.set('match', query.match);
   traceParams.set('sort', sort);
   traceParams.set('limit', String(pageSize));
   traceParams.set('offset', String(page * pageSize));
@@ -347,8 +359,23 @@ function Workspace({api, logout, section, project, traceId, models}: {
   }, [api, reload, rule, section, selectedTrace, visibleTrace]);
 
   const selectedLabeler = labelers.find(item => item.id === query.agent) ?? labelers[0];
-  const matchingRuns = [...new Set(traces.flatMap(trace =>
-    trace.matching_run_ids.filter(id => trace.cells.some(cell => cell.run_id === id))))];
+  const pageSelection = traces.flatMap(trace => trace.matching_run_ids
+    .filter(id => trace.cells.some(cell => cell.run_id === id)).map(run_id => ({trace_id: trace.id, run_id})));
+  const matchingRuns = [...new Set(pageSelection.map(item => item.run_id))];
+  const activeIssues = new Set([issue, query.extraIssue]);
+  const comparePeers = activeIssues.has('agent-agent-disagreements') || sort === 'disagreement';
+  const compareAgent = comparePeers || ['agent-disagreements', 'agent-review-disagreements', 'agent-unlabeled'].some(filter => activeIssues.has(filter));
+  const compareReviewer = sort === 'disagreement' || activeIssues.has('disagreements') || activeIssues.has('agent-review-disagreements');
+  const selectionKey = (item: Selection) => `${item.trace_id}:${item.run_id}`;
+  const selected = new Set(selection.map(selectionKey));
+  function selectItems(items: Selection[]) {
+    setSelection(current => [...new Map([...current, ...items].map(item => [selectionKey(item), item])).values()].slice(0, 250));
+  }
+  function toggleItem(item: Selection) {
+    if (selected.has(selectionKey(item))) {
+      setSelection(current => current.filter(entry => selectionKey(entry) !== selectionKey(item)));
+    } else selectItems([item]);
+  }
   async function runAgent(ids: number[]) {
     if (!selectedLabeler || agentBatch.current || !ids.length) return;
     const batch = {stop: false};
@@ -398,6 +425,7 @@ function Workspace({api, logout, section, project, traceId, models}: {
         <Link to="/traces" aria-current={section === 'traces' ? 'page' : undefined}>Traces</Link>
         <Link to="/pipelines" aria-current={section === 'projects' ? 'page' : undefined}>Pipelines</Link>
         <Link to="/agentic-labelers" aria-current={section === 'labelers' ? 'page' : undefined}>Agentic labelers</Link>
+        <Link to="/eval-sets" aria-current={section === 'evals' ? 'page' : undefined}>Evaluation sets</Link>
         <Link to="/api-keys" aria-current={section === 'keys' ? 'page' : undefined}>API keys</Link>
       </nav>
       <button className="quiet" type="button" onClick={logout}>Sign out</button>
@@ -408,34 +436,19 @@ function Workspace({api, logout, section, project, traceId, models}: {
         {section === 'traces' && <>
           <div className="page-heading">
             <h1>{traceId ? 'Trace review' : 'Lint traces'}</h1>
-            <div className="export" role="group" aria-label="Export dataset">
-              <label className="sr-only" htmlFor="dataset">Dataset to export</label>
-              <select id="dataset" value={exportKind} onChange={event => {
-                const value = exportKinds.find(kind => kind === event.target.value);
-                if (value) void setQuery({exportKind: value});
-              }}>
-                <option value="files">File decisions</option>
-                <option value="ranges">Range examples</option>
-                <option value="adjudication">Adjudication examples</option>
-                <option value="annotated">All annotated data</option>
-                <option value="all">All lint data</option>
-              </select>
-              <label><input type="checkbox" checked={Boolean(query.includeAgentic)}
-                onChange={event => void setQuery({includeAgentic: Number(event.target.checked)})}/>Include agentic labels</label>
-              <button type="button" onClick={download}>Export JSONL</button>
-            </div>
           </div>
           {traceId && <Link to={gatewayQuery(tracePath(project), {...query, ...closedReview, page: null})}>← Project traces</Link>}
           <div className="filters">
             <label>Find<select value={issue} onChange={event => {
               const next = event.target.value;
               void setQuery({issue: next, page: null, sort: next === 'agent-disagreements' ? 'confidence-desc'
+                : ['agent-review-disagreements', 'agent-agent-disagreements'].includes(next) ? 'disagreement'
                 : next === 'low-confidence' ? 'confidence-asc' : 'relevance'});
             }}>
               {Object.entries(issueLabels).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
             </select></label>
             <label>Sort<select value={sort} onChange={event => void setQuery({sort: event.target.value as typeof sort, page: null})}>
-              <option value="relevance">Relevance</option><option value="newest">Newest</option>
+              <option value="relevance">Relevance</option><option value="disagreement">Most disagreeing rules</option><option value="newest">Newest</option>
               <option value="confidence-asc">Lowest pipeline confidence</option>
               <option value="confidence-desc">Highest pipeline confidence</option><option value="path">File path</option>
             </select></label>
@@ -449,13 +462,59 @@ function Workspace({api, logout, section, project, traceId, models}: {
               onChange={rules => void setQuery({rules, rule: null, page: null})}/>
             {rule && <button type="button" onClick={() => void setQuery({rule: null, page: null})}>Clear rule path filter</button>}
           </div>
+          <details className="dataset-actions" open={Boolean(query.pathContains || query.sourceContains || query.extraIssue || query.filterAgent || query.peerAgent || query.reviewerOrigin || query.minConfidence || query.maxConfidence) || undefined}>
+            <summary>Advanced filters</summary>
+            <div className="filters">
+              <label>Path contains<input maxLength={500} value={query.pathContains} onChange={event => void setQuery({pathContains: event.target.value, page: null}, {history: 'replace'})}/></label>
+              <label>Source contains<input maxLength={500} value={query.sourceContains} onChange={event => void setQuery({sourceContains: event.target.value, page: null}, {history: 'replace'})}/></label>
+              <label>Minimum file confidence<input type="number" min={0} max={1} step={0.01} value={query.minConfidence} onChange={event => void setQuery({minConfidence: event.target.value, page: null}, {history: 'replace'})}/></label>
+              <label>Maximum file confidence<input type="number" min={0} max={1} step={0.01} value={query.maxConfidence} onChange={event => void setQuery({maxConfidence: event.target.value, page: null}, {history: 'replace'})}/></label>
+              {compareAgent && <label>Agent result to check<select value={query.filterAgent ?? ''} onChange={event => {
+                const filterAgent = Number(event.target.value) || null;
+                void setQuery({filterAgent, peerAgent: filterAgent === query.peerAgent ? null : query.peerAgent, page: null});
+              }}>
+                <option value="">Any agent</option>{labelers.map(item => <option key={item.id} value={item.id}>{item.name} · {item.model}</option>)}
+              </select><small>Use results from this saved labeler when checking for disagreements or missing labels.</small></label>}
+              {comparePeers && <label>Compare with another agent<select value={query.peerAgent ?? ''} onChange={event => void setQuery({peerAgent: Number(event.target.value) || null, page: null})}>
+                <option value="">Any different agent</option>{labelers.filter(item => item.id !== query.filterAgent).map(item => <option key={item.id} value={item.id}>{item.name} · {item.model}</option>)}
+              </select><small>For agent-to-agent disagreements, compare the first labeler with this one.</small></label>}
+              {compareReviewer && <label>Reviewer source<select value={query.reviewerOrigin} onChange={event => void setQuery({reviewerOrigin: event.target.value, page: null})}>
+                <option value="">Any reviewer</option><option value="human">Any human</option><option value="webapp">Signed browser</option>
+                <option value="ide">IDE</option><option value="mcp">External MCP</option><option value="api">External REST</option><option value="legacy">Legacy</option>
+              </select><small>Limit pipeline or agent comparisons to annotations from this source.</small></label>}
+              <label>Additional issue<select value={query.extraIssue} onChange={event => void setQuery({extraIssue: event.target.value, page: null})}>
+                <option value="">None</option>{Object.entries(issueLabels).filter(([id]) => id !== 'all').map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+              </select></label>
+              {query.extraIssue && <label>Combine issues<select value={query.match} onChange={event => void setQuery({match: event.target.value === 'any' ? 'any' : 'all', page: null})}>
+                <option value="all">Match both</option><option value="any">Match either</option>
+              </select></label>}
+            </div>
+          </details>
+          <DatasetActions api={api} selection={selection} labelers={labelers} onError={setError}
+            matchingOnPage={pageSelection.length} onSelectPage={() => selectItems(pageSelection)} onClear={() => setSelection([])}
+            scopeDownload={<div className="export" role="group" aria-label="Project and rule JSONL options">
+              <label className="sr-only" htmlFor="dataset">Dataset to export</label>
+              <select id="dataset" value={exportKind} onChange={event => {
+                const value = exportKinds.find(kind => kind === event.target.value);
+                if (value) void setQuery({exportKind: value});
+              }}>
+                <option value="files">File decisions</option>
+                <option value="ranges">Range examples</option>
+                <option value="adjudication">Adjudication examples</option>
+                <option value="annotated">All annotated data</option>
+                <option value="all">All lint data</option>
+              </select>
+              <label><input type="checkbox" checked={Boolean(query.includeAgentic)}
+                onChange={event => void setQuery({includeAgentic: Number(event.target.checked)})}/>Include agentic labels</label>
+              <button type="button" onClick={download}>Download .jsonl</button>
+            </div>}/>
           <div className="matrix-bar">
             <TableStages selected={stages} onChange={stages => void setQuery({stages})}/>
             <button className="quiet" type="button" onClick={refresh}>Refresh</button>
           </div>
           <div className="matrix-bar agent-controls">
             {selectedLabeler ? <>
-              <label>Agentic labeler <select value={selectedLabeler.id} disabled={Boolean(agentProgress)}
+              <label>Agent to run <select value={selectedLabeler.id} disabled={Boolean(agentProgress)}
                 onChange={event => void setQuery({agent: Number(event.target.value)})}>
                 {labelers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
               </select></label>
@@ -469,7 +528,9 @@ function Workspace({api, logout, section, project, traceId, models}: {
               {agentSummary && <span role="status">{agentSummary}</span>}
             </> : <Link to="/agentic-labelers">Configure an agentic labeler</Link>}
           </div>
-          {data ? <Matrix runAgent={selectedLabeler ? ids => void runAgent(ids) : undefined} agentBusy={Boolean(agentProgress)} traces={traces} stages={stages} open={open}
+          {data ? <Matrix selected={selected} onSelect={toggleItem}
+            compareLink={trace => gatewayQuery(tracePath(trace.project), {pathContains: trace.file_path, key: String(trace.key_id), sort: 'newest'})}
+            runAgent={selectedLabeler ? ids => void runAgent(ids) : undefined} agentBusy={Boolean(agentProgress)} traces={traces} stages={stages} open={open}
             languages={selectedTrace && language ? {[selectedTrace]: language} : {}}
             openFile={trace => open(trace, undefined, 'files')}
             traceLink={trace => gatewayQuery(tracePath(trace.project, trace.id), {...query, ...closedReview, page: null})}
@@ -483,6 +544,7 @@ function Workspace({api, logout, section, project, traceId, models}: {
             <button type="button" disabled={!data.more} onClick={() => void setQuery({page: page + 1})}>Next →</button>
           </div>}
         </>}
+        {section === 'evals' && <EvalSets api={api} onError={setError}/>}
         {section === 'labelers' && <LabelerSettings api={api} items={labelers} refresh={refresh} onError={setError}/>}
         {section === 'keys' && <Keys api={api} keys={keys} refresh={refresh} onError={setError}/>}
         {section === 'projects' && <>

@@ -1,6 +1,6 @@
 import {createSerializer, parseAsArrayOf, parseAsInteger, parseAsString, parseAsStringLiteral} from 'nuqs';
 
-export const sectionPaths = {traces: '/traces', projects: '/pipelines', keys: '/api-keys', labelers: '/agentic-labelers'} as const;
+export const sectionPaths = {traces: '/traces', projects: '/pipelines', keys: '/api-keys', labelers: '/agentic-labelers', evals: '/eval-sets'} as const;
 export type Section = keyof typeof sectionPaths;
 
 export const routes = [
@@ -11,6 +11,7 @@ export const routes = [
   {id: 'projects', path: '/pipelines'},
   {id: 'models', path: '/pipelines/:pipelineId/models'},
   {id: 'labelers', path: '/agentic-labelers'},
+  {id: 'evals', path: '/eval-sets'},
   {id: 'keys', path: '/api-keys'},
   {id: 'find', path: '/find-ranges/:runId'},
 ] as const;
@@ -37,6 +38,9 @@ export const issueLabels = {
   unreviewed: 'Unreviewed decisions',
   'low-confidence': 'Low pipeline confidence',
   'agent-disagreements': 'Agent and pipeline disagree',
+  'agent-review-disagreements': 'Agent and reviewer disagree',
+  'agent-agent-disagreements': 'Two agents disagree',
+  'agent-unlabeled': 'Missing agent result',
   failed: 'Processing failed',
 };
 
@@ -47,8 +51,17 @@ export const navigation = {
   key: parseAsString.withDefault(''),
   rule: parseAsString.withDefault(''),
   rules: parseAsArrayOf(parseAsString).withDefault([]),
-  sort: parseAsStringLiteral(['relevance', 'newest', 'confidence-asc', 'confidence-desc', 'path']).withDefault('relevance'),
+  sort: parseAsStringLiteral(['relevance', 'newest', 'confidence-asc', 'confidence-desc', 'path', 'disagreement']).withDefault('relevance'),
   agent: parseAsInteger,
+  filterAgent: parseAsInteger,
+  peerAgent: parseAsInteger,
+  reviewerOrigin: parseAsString.withDefault(''),
+  pathContains: parseAsString.withDefault(''),
+  sourceContains: parseAsString.withDefault(''),
+  minConfidence: parseAsString.withDefault(''),
+  maxConfidence: parseAsString.withDefault(''),
+  extraIssue: parseAsString.withDefault(''),
+  match: parseAsStringLiteral(['all', 'any']).withDefault('all'),
   includeAgentic: parseAsInteger.withDefault(0),
   page: parseAsInteger.withDefault(0),
   exportKind: parseAsStringLiteral(exportKinds).withDefault('adjudication'),

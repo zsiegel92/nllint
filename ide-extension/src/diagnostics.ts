@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import * as vscode from "vscode";
-import { annotationPairs } from "./annotations.js";
+import { resolveAnnotationPair } from "./annotation-target.js";
 import type { FileResult, LintDiagnostic, Snapshot } from "./protocol.js";
+
+const annotationPairs = new WeakMap<vscode.Diagnostic, number>();
 
 type FileDiagnostics = {
 	uri: vscode.Uri;
@@ -13,6 +15,18 @@ export class DiagnosticStore implements vscode.Disposable {
 	private readonly collection =
 		vscode.languages.createDiagnosticCollection("nllint");
 	private readonly byWatcher = new Map<string, Map<string, FileDiagnostics>>();
+
+	annotationPair(
+		uri: vscode.Uri,
+		diagnostic: vscode.Diagnostic,
+	): number | undefined {
+		const candidates = [...this.byWatcher.values()].flatMap(
+			(files) => files.get(uri.fsPath)?.diagnostics ?? [],
+		);
+		return resolveAnnotationPair(diagnostic, candidates, (candidate) =>
+			annotationPairs.get(candidate),
+		);
+	}
 
 	update(watcherId: string, snapshot: Snapshot): void {
 		const incoming = groupDiagnostics(snapshot.root, snapshot.diagnostics);

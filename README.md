@@ -48,13 +48,16 @@ The CLI and IDE prefer in-repo settings. External settings are selected by an ex
 nllint --dry-run
 nllint
 nllint --json
+nllint --json --file src/parser.py --file src/validator.py
 nllint watch --stream
 nllint --include-git-ignored
 ```
 
+Repeat `--file` to check selected project-relative files. Project selectors and ignore rules still apply.
+
 `include_git_ignored` enables ignored files for a particular project. Configured glob exclusions still apply. `--force-fresh` bypasses the local cache for that invocation. The gateway can still return work from its own cache.
 
-Build and install the [VS Code extension](ide-extension/README.md) with `./ide-extension/install.sh`. Install the [NLLint skill](skills/nllint/SKILL.md) with `./install-skill.sh`.
+Build and install the [VS Code extension](ide-extension/README.md) with `make ide-install`. Install the [NLLint skill](skills/nllint/SKILL.md) with `./install-skill.sh`.
 
 ## Review and export
 
@@ -86,7 +89,7 @@ Vite defaults to [localhost:5175](http://localhost:5175) and FastAPI defaults to
 - `make cli-build` and `make cli-release` compile the Rust CLI. `make cli-install` installs it. Use `make cli-run ARGS="--dry-run"` or `make cli-watch ARGS="--stream"` to pass flags through.
 - `make test` runs Rust, gateway, and extension tests. Set `NLLINT_TEST_DATABASE_URL` in your shell to include Postgres integration tests against a disposable database with the gateway schema. Use `make check` for Rust and Python static checks.
 
-The gateway exposes its bearer-authenticated Streamable HTTP MCP server at `/mcp` and a declarative REST search at `POST /v1/traces/search`. See the [NLLint skill](skills/nllint/SKILL.md) for client setup, query examples, in-band annotations, and false-positive calibration. Apply the database migration before using agentic labelers or annotation attribution.
+The gateway exposes its bearer-authenticated Streamable HTTP MCP server at `/mcp` and a declarative REST search at `POST /v1/traces/search`. See the [NLLint skill](skills/nllint/SKILL.md) for client setup, query examples, in-band annotations, and false-positive calibration. Freeze labeled traces in evaluation sets and compare rule revisions on identical source using MCP or the control plane. Apply the database migration before using annotation attribution, agentic labelers, or evaluation sets.
 
 Regenerate config schemas after changing the Rust settings types:
 

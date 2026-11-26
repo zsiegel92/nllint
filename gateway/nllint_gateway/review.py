@@ -21,6 +21,15 @@ from .db import Database, notify_work, request_db
 from .providers import Providers
 from .routing import Routing, RoutingEdit
 from .settings import Settings
+from .trace_search import (
+    ANNOTATION_FILTERS,
+    RANGE_COUNTS,
+    RULE_VERSION_ID,
+    ReviewerOrigin,
+    TraceSearch,
+    TraceSort,
+    search_rows,
+)
 
 router = APIRouter(prefix="/api", dependencies=[Depends(operator)])
 
@@ -33,33 +42,6 @@ class ReviewServices:
     providers: Providers
 
 
-FILE_POSITIVE_POINTS = 1
-RANGE_POSITIVE_POINTS = 2
-ADJUDICATED_POSITIVE_POINTS = 3
-
-# Source text is already content-addressed. Scope each version to the supplied
-# rule ID and path in its project, independent of the API key that submitted it.
-RULE_VERSION_ID = """
-encode(sha256(convert_to(
-    jsonb_build_array(f.project_id, tr.rule_id, f.rule_path, f.rule_hash)::text, 'UTF8'
-)), 'hex')
-"""
-RANGE_COUNTS = """
-CROSS JOIN LATERAL (
-    SELECT
-        (SELECT count(*) FROM range_candidates c WHERE c.run_id=r.id) AS range_positives,
-        (SELECT count(*) FROM questions a
-         WHERE a.run_id=r.id AND a.stage='adjudication' AND a.decision) AS adjudicated_positives
-) counts
-"""
-TRACE_SORTS = {
-    "relevance": "scored.score DESC, t.created_at DESC, t.id",
-    "newest": "t.created_at DESC, t.id",
-    "confidence-asc": "scored.confidence_min ASC NULLS LAST, t.created_at DESC, t.id",
-    "confidence-desc": "scored.confidence_max DESC NULLS LAST, t.created_at DESC, t.id",
-    "path": "t.file_path, t.created_at DESC, t.id",
-}
-
 CELL = f"""
     SELECT r.id AS run_id, r.batch_id, r.stage, r.error, f.id AS pair_id,
            f.file_label, f.labeler_identity::text AS labeler_identity, f.rule_path, f.file_hash, f.rule_hash, tr.rule_id,
@@ -71,39 +53,6 @@ CELL = f"""
     JOIN file_rules f ON f.id=r.pair_id
     LEFT JOIN questions q ON q.run_id=r.id AND q.stage='file'
 """
-
-FILTERS = {
-    "all": "TRUE",
-    "file-range-positives": """q.decision AND EXISTS (
-        SELECT 1 FROM range_candidates c WHERE c.run_id=r.id)""",
-    "adjudicated-positives": """EXISTS (
-        SELECT 1 FROM questions a WHERE a.run_id=r.id AND a.stage='adjudication' AND a.decision)""",
-    "no-ranges": """q.decision AND r.stage='ready'
-        AND NOT EXISTS (SELECT 1 FROM range_candidates c WHERE c.run_id=r.id)""",
-    "all-rejected": """q.decision AND r.stage='ready'
-        AND EXISTS (SELECT 1 FROM range_candidates c WHERE c.run_id=r.id)
-        AND NOT EXISTS (SELECT 1 FROM questions a WHERE a.run_id=r.id AND a.stage='adjudication' AND a.decision)""",
-    "disagreements": """(q.decision IS NOT NULL AND f.file_label <> q.decision) OR EXISTS (
-        SELECT 1 FROM range_annotations a LEFT JOIN questions j
-        ON j.run_id=r.id AND j.stage='adjudication' AND j.start_line=a.start_line AND j.end_line=a.end_line
-        WHERE a.pair_id=f.id AND (a.decision <> j.decision OR (a.decision AND j.run_id IS NULL)))""",
-    "rejected-candidates": """EXISTS (SELECT 1 FROM questions a
-        WHERE a.run_id=r.id AND a.stage='adjudication' AND NOT a.decision)""",
-    "unreviewed": """(f.file_label IS NULL AND q.decision IS NOT NULL) OR EXISTS (
-        SELECT 1 FROM questions a WHERE a.run_id=r.id AND a.stage='adjudication' AND NOT EXISTS (
-            SELECT 1 FROM range_annotations l WHERE l.pair_id=f.id
-            AND (l.start_line,l.end_line)=(a.start_line,a.end_line)))""",
-    "failed": "r.stage='failed'",
-    "low-confidence": "q.confidence <= 0.65",
-    "agent-disagreements": """r.stage='ready' AND EXISTS (
-        SELECT 1 FROM agentic_labels a WHERE a.run_id=r.id AND (
-           (jsonb_array_length(a.ranges)>0) IS DISTINCT FROM q.decision
-           OR ARRAY(SELECT format('%s:%s', value->>'start', value->>'end')
-                    FROM jsonb_array_elements(a.ranges) ORDER BY 1) <>
-              ARRAY(SELECT format('%s:%s', j.start_line, j.end_line)
-                    FROM questions j WHERE j.run_id=r.id AND j.stage='adjudication' AND j.decision ORDER BY 1)
-        ))""",
-}
 
 
 @router.get("/keys")
@@ -310,84 +259,6 @@ async def rules(
     return [dict(row) for row in rows]
 
 
-TraceSort = Literal["relevance", "newest", "confidence-asc", "confidence-desc", "path"]
-ANNOTATION_FILTERS = {"disagreements", "unreviewed", "agent-disagreements"}
-
-
-class TraceSearch(Strict):
-    key_id: int | None = None
-    project: str | None = None
-    trace_id: str | None = None
-    rule: str | None = None
-    rule_version: list[str] = Field(default_factory=list, max_length=100)
-    positive_rule_versions_only: bool = False
-    issues: list[str] = Field(default_factory=list, max_length=12)
-    match: Literal["all", "any"] = "all"
-    path: str | None = Field(default=None, max_length=500)
-    source_text: str | None = Field(default=None, max_length=500)
-    min_confidence: float | None = Field(default=None, ge=0, le=1)
-    max_confidence: float | None = Field(default=None, ge=0, le=1)
-    sort: TraceSort = "relevance"
-    limit: int = Field(default=20, ge=1, le=100)
-    offset: int = Field(default=0, ge=0)
-
-
-async def search_rows(conn, search: TraceSearch, *, pipeline_only=False):
-    allowed = FILTERS.keys() - ANNOTATION_FILTERS if pipeline_only else FILTERS.keys()
-    if any(issue not in allowed for issue in search.issues):
-        raise HTTPException(400, "Unknown or unavailable issue filter")
-    joiner = " AND " if search.match == "all" else " OR "
-    predicate = joiner.join(f"({FILTERS[issue]})" for issue in search.issues) or "TRUE"
-    rule_match = f"{RULE_VERSION_ID}=ANY($7::text[])"
-    if search.positive_rule_versions_only:
-        rule_match = f"q.decision AND ({rule_match})"
-    eligible = f"""($4::text IS NULL OR f.rule_path=$4) AND ({predicate})
-        AND (cardinality($7::text[])=0 OR ({rule_match}))
-        AND ($10::double precision IS NULL OR q.confidence >= $10)
-        AND ($11::double precision IS NULL OR q.confidence <= $11)"""
-    return await conn.fetch(
-        f"""
-        SELECT t.id,t.file_path,t.created_at,t.key_id,k.name AS key_name,p.name AS project,p.id AS project_id,
-               scored.score,scored.confidence_min,scored.confidence_max,scored.matching_run_ids
-        FROM traces t JOIN projects p ON p.id=t.project_id JOIN api_keys k ON k.id=t.key_id
-        CROSS JOIN LATERAL (
-            SELECT
-                sum(CASE WHEN q.decision THEN {FILE_POSITIVE_POINTS} ELSE 0 END
-                    + {RANGE_POSITIVE_POINTS} * counts.range_positives
-                    + {ADJUDICATED_POSITIVE_POINTS} * counts.adjudicated_positives)::bigint AS score,
-                min(q.confidence) FILTER (WHERE match.eligible) AS confidence_min,
-                max(q.confidence) FILTER (WHERE match.eligible) AS confidence_max,
-                array_agg(r.id ORDER BY r.id) FILTER (WHERE match.eligible) AS matching_run_ids
-            FROM trace_runs tr JOIN runs r ON r.id=tr.run_id
-            JOIN file_rules f ON f.id=r.pair_id
-            LEFT JOIN questions q ON q.run_id=r.id AND q.stage='file'
-            {RANGE_COUNTS}
-            CROSS JOIN LATERAL (SELECT {eligible} AS eligible) match
-            WHERE tr.trace_id=t.id
-            AND ($9::text IS NULL OR EXISTS (
-                SELECT 1 FROM texts body WHERE (body.key_id,body.hash)=(f.key_id,f.file_hash)
-                AND strpos(lower(body.body),lower($9))>0
-            ))
-        ) scored
-        WHERE ($1::bigint IS NULL OR t.key_id=$1) AND ($2::text IS NULL OR p.name=$2)
-        AND ($3::text IS NULL OR t.id=$3) AND scored.matching_run_ids IS NOT NULL
-        AND ($8::text IS NULL OR strpos(lower(t.file_path),lower($8))>0)
-        ORDER BY {TRACE_SORTS[search.sort]} LIMIT $5 OFFSET $6
-        """,
-        search.key_id,
-        search.project,
-        search.trace_id,
-        search.rule,
-        search.limit + 1,
-        search.offset,
-        search.rule_version,
-        search.path,
-        search.source_text,
-        search.min_confidence,
-        search.max_confidence,
-    )
-
-
 @router.get("/traces")
 async def traces(
     request: Request,
@@ -400,6 +271,15 @@ async def traces(
     rule_version: list[str] = Query(default=[], max_length=100),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    path: str | None = Query(None, max_length=500),
+    source_text: str | None = Query(None, max_length=500),
+    min_confidence: float | None = Query(None, ge=0, le=1),
+    max_confidence: float | None = Query(None, ge=0, le=1),
+    agent_labeler_id: int | None = Query(None, ge=1),
+    peer_labeler_id: int | None = Query(None, ge=1),
+    reviewer_origin: ReviewerOrigin | None = None,
+    extra_issue: list[str] = Query(default=[], max_length=10),
+    match: Literal["all", "any"] = "all",
 ):
     return await search_traces(
         TraceSearch(
@@ -408,8 +288,19 @@ async def traces(
             trace_id=trace_id,
             rule=rule,
             positive_rule_versions_only=issue
-            not in {"low-confidence", "agent-disagreements"},
-            issues=[issue],
+            not in {"low-confidence", *ANNOTATION_FILTERS}
+            and min_confidence is None
+            and max_confidence is None
+            and not extra_issue,
+            issues=([issue] if issue != "all" else []) + extra_issue,
+            path=path,
+            source_text=source_text,
+            min_confidence=min_confidence,
+            max_confidence=max_confidence,
+            agent_labeler_id=agent_labeler_id,
+            peer_labeler_id=peer_labeler_id,
+            reviewer_origin=reviewer_origin,
+            match=match,
             sort=sort,
             rule_version=rule_version,
             limit=limit,
@@ -442,8 +333,14 @@ async def find_traces(
             [row["id"] for row in page],
             rule,
         )
-        ranges = await review_ranges(conn, list({row["run_id"] for row in cells}))
-        labels = await agent_labels(conn, [cell["run_id"] for cell in cells])
+        ranges = (
+            defaultdict(list)
+            if body.summary_only
+            else await review_ranges(conn, list({row["run_id"] for row in cells}))
+        )
+        labels = await agent_labels(
+            conn, [cell["run_id"] for cell in cells], summary_only=body.summary_only
+        )
         with_ranges = {row["pair_id"] for row in cells if ranges.get(row["run_id"])}
         sources = await conn.fetch(
             """
@@ -656,7 +553,7 @@ def decode_identity(raw):
     return json.loads(raw) if raw else None
 
 
-async def agent_labels(conn, ids):
+async def agent_labels(conn, ids, *, summary_only=False):
     labels = defaultdict(list)
     for row in await conn.fetch(
         """
@@ -666,12 +563,16 @@ async def agent_labels(conn, ids):
         ids,
     ):
         ranges = json.loads(row["ranges"])
+        identity = json.loads(row["labeler_identity"])
+        if summary_only:
+            identity.pop("instructions", None)
         labels[row["run_id"]].append(
             {
                 "labeler_id": row["labeler_id"],
-                "ranges": ranges,
+                "range_count": len(ranges),
+                "ranges": [] if summary_only else ranges,
                 "violates": bool(ranges),
-                "labeler_identity": json.loads(row["labeler_identity"]),
+                "labeler_identity": identity,
             }
         )
     return labels
@@ -709,7 +610,9 @@ def annotation_identity(principal: Principal, settings: Settings, body, target, 
     if body.decision is None:
         return None
     data = identity.model_dump(exclude_none=True) if identity else {"type": kind}
-    data["origin"] = "ide" if principal.origin == "ide" else "api"
+    if principal.key_id is not None:
+        data["key_id"] = principal.key_id
+    data["origin"] = "api" if principal.origin == "webapp" else principal.origin
     if kind == "HUMAN":
         data["user_id"] = user_id
         if principal.origin == "webapp":
@@ -720,6 +623,75 @@ def annotation_identity(principal: Principal, settings: Settings, body, target, 
                 settings,
             )
     return json.dumps(data)
+
+
+async def record_annotation(
+    conn, principal, pair_id, decision, labeler, kind, start=None, end=None
+):
+    if labeler is None:
+        labeler = json.dumps(
+            {
+                "type": kind,
+                "origin": principal.origin,
+                "user_id": principal.user_id,
+                **(
+                    {"key_id": principal.key_id} if principal.key_id is not None else {}
+                ),
+            }
+        )
+    await conn.execute(
+        """
+        INSERT INTO annotation_history(pair_id,start_line,end_line,decision,labeler_identity)
+        VALUES ($1,$2,$3,$4,$5::jsonb)
+    """,
+        pair_id,
+        start,
+        end,
+        decision,
+        labeler,
+    )
+
+
+async def annotation_history(
+    pair_id: int,
+    principal: Principal,
+    services: ReviewServices,
+    limit: int = 30,
+    offset: int = 0,
+):
+    async with services.db.tenant(principal.user_id, readonly=True) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id,start_line AS start,end_line AS end,decision,labeler_identity::text,created_at
+            FROM annotation_history WHERE pair_id=$1 ORDER BY id DESC LIMIT $2 OFFSET $3
+        """,
+            pair_id,
+            limit + 1,
+            offset,
+        )
+    return {
+        "events": [
+            {**dict(row), "labeler_identity": decode_identity(row["labeler_identity"])}
+            for row in rows[:limit]
+        ],
+        "more": len(rows) > limit,
+    }
+
+
+@router.get("/pairs/{pair_id}/history")
+async def recent_annotations(
+    pair_id: int,
+    request: Request,
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    return await annotation_history(
+        pair_id,
+        request.state.principal,
+        request.app.state.review_services,
+        limit,
+        offset,
+    )
 
 
 @router.put("/pairs/{pair_id}/file")
@@ -776,6 +748,9 @@ async def write_file_annotation(
                 body.decision,
                 labeler,
             )
+            await record_annotation(
+                conn, principal, pair_id, body.decision, labeler, kind
+            )
             if body.decision:
                 await schedule(
                     conn, pair_id, version, settings.nllint_annotation_delay_seconds
@@ -821,29 +796,30 @@ async def write_file_annotation(
                 for candidate in candidates:
                     if candidate["decision"] is not None:
                         protect_annotation(candidate["labeler_identity"])
-            await conn.executemany(
-                """
-                INSERT INTO range_annotations(pair_id,start_line,end_line,decision,labeler_identity)
-                VALUES ($1,$2,$3,false,$4::jsonb)
-                ON CONFLICT (pair_id,start_line,end_line) DO UPDATE
-                SET decision=false,updated_at=now(),labeler_identity=EXCLUDED.labeler_identity
-            """,
-                [
-                    (
-                        pair_id,
-                        row["start_line"],
-                        row["end_line"],
-                        annotation_identity(
-                            principal,
-                            settings,
-                            body,
-                            ["range", pair_id, row["start_line"], row["end_line"]],
-                            kind,
-                        ),
-                    )
-                    for row in candidates
-                ],
-            )
+            for row in candidates:
+                start, end = row["start_line"], row["end_line"]
+                range_labeler = annotation_identity(
+                    principal, settings, body, ["range", pair_id, start, end], kind
+                )
+                if row["decision"] is False and decode_identity(
+                    row["labeler_identity"]
+                ) == decode_identity(range_labeler):
+                    continue
+                await conn.execute(
+                    """
+                    INSERT INTO range_annotations(pair_id,start_line,end_line,decision,labeler_identity)
+                    VALUES ($1,$2,$3,false,$4::jsonb)
+                    ON CONFLICT (pair_id,start_line,end_line) DO UPDATE
+                    SET decision=false,updated_at=now(),labeler_identity=EXCLUDED.labeler_identity
+                """,
+                    pair_id,
+                    start,
+                    end,
+                    range_labeler,
+                )
+                await record_annotation(
+                    conn, principal, pair_id, False, range_labeler, kind, start, end
+                )
         if changed or body.reject_all:
             await revision(conn, pair)
     return {"decision": body.decision}
@@ -976,8 +952,28 @@ async def write_range_annotation(
             )
             changed = result != "INSERT 0 0"
         if changed:
+            await record_annotation(
+                conn,
+                principal,
+                pair_id,
+                body.decision,
+                labeler,
+                kind,
+                body.start,
+                body.end,
+            )
             await revision(conn, pair)
     return {"decision": body.decision}
+
+
+def check_reviewer(identity, origin: ReviewerOrigin | None) -> bool:
+    if origin is None:
+        return True
+    if identity is None:
+        return origin == "legacy"
+    if origin == "human":
+        return identity["type"] == "HUMAN"
+    return identity["origin"] == origin
 
 
 async def training_records(
@@ -991,6 +987,11 @@ async def training_records(
     include_agentic,
     *,
     agent_only=False,
+    selection=None,
+    include_history=False,
+    agent_labeler_ids=None,
+    include_review=True,
+    reviewer_origin=None,
 ):
     query = f"""
         SELECT tr.trace_id,r.id AS run_id,f.id AS pair_id,r.version AS routing_version,
@@ -1018,6 +1019,10 @@ async def training_records(
             SELECT 1 FROM range_annotations a WHERE a.pair_id=f.id
         ) OR ($7::boolean AND EXISTS (SELECT 1 FROM agentic_labels a WHERE a.run_id=r.id)))
         AND (NOT $8::boolean OR EXISTS (SELECT 1 FROM agentic_labels a WHERE a.run_id=r.id))
+        AND ($9::jsonb IS NULL OR EXISTS (
+            SELECT 1 FROM jsonb_to_recordset($9::jsonb) AS sel(trace_id text, run_id bigint)
+            WHERE (tr.trace_id,r.id)=(sel.trace_id,sel.run_id)
+        ))
         ORDER BY tr.trace_id,r.id
     """
     async with request_db(request, readonly=True) as conn:
@@ -1031,6 +1036,7 @@ async def training_records(
             annotated_only,
             include_agentic,
             agent_only,
+            selection,
         )
         while rows := await cursor.fetch(100):
             ids = list({row["run_id"] for row in rows})
@@ -1040,19 +1046,105 @@ async def training_records(
                 item = dict(row)
                 item["questions"] = json.loads(item["questions"])
                 item["labeler_identity"] = decode_identity(item["labeler_identity"])
+                if not include_review or not check_reviewer(
+                    item["labeler_identity"], reviewer_origin
+                ):
+                    item["file_label"] = None
+                    item["labeler_identity"] = None
                 if include_agentic:
-                    item["agentic_labels"] = labels[item["run_id"]]
+                    item["agentic_labels"] = [
+                        agent
+                        for agent in labels[item["run_id"]]
+                        if not agent_labeler_ids
+                        or agent["labeler_id"] in agent_labeler_ids
+                    ]
+                if include_history:
+                    events = await conn.fetch(
+                        """
+                        SELECT start_line AS start,end_line AS end,decision,labeler_identity::text,created_at::text
+                        FROM annotation_history WHERE pair_id=$1 ORDER BY id
+                    """,
+                        item["pair_id"],
+                    )
+                    item["annotation_history"] = [
+                        {
+                            **dict(event),
+                            "labeler_identity": decode_identity(
+                                event["labeler_identity"]
+                            ),
+                        }
+                        for event in events
+                        if check_reviewer(
+                            decode_identity(event["labeler_identity"]), reviewer_origin
+                        )
+                    ]
                 lines = source_lines(item["source"])
-                item["ranges"] = [
-                    {
-                        **region,
-                        "snippet": "\n".join(
-                            lines[region["start"] - 1 : region["end"]]
-                        ),
-                    }
-                    for region in ranges.get(item["run_id"], [])
-                ]
+                item["ranges"] = []
+                for region in ranges.get(item["run_id"], []):
+                    if not include_review or not check_reviewer(
+                        region["labeler_identity"], reviewer_origin
+                    ):
+                        if not region["candidate"]:
+                            continue
+                        region = {
+                            **region,
+                            "annotation": None,
+                            "labeler_identity": None,
+                        }
+                    item["ranges"].append(
+                        {
+                            **region,
+                            "snippet": "\n".join(
+                                lines[region["start"] - 1 : region["end"]]
+                            ),
+                        }
+                    )
                 yield item
+
+
+class TraceSelection(Strict):
+    trace_id: str = Field(min_length=1, max_length=128)
+    run_id: int = Field(ge=1)
+
+
+class SelectedExport(Strict):
+    selection: list[TraceSelection] = Field(min_length=1, max_length=250)
+    include_agentic: bool = False
+    include_history: bool = False
+    include_review: bool = True
+    reviewer_origin: ReviewerOrigin | None = None
+    agent_labeler_ids: list[int] = Field(default_factory=list, max_length=100)
+
+
+@router.post("/export/selection")
+async def export_selection(body: SelectedExport, request: Request):
+    selection = json.dumps([example.model_dump() for example in body.selection])
+
+    async def records():
+        async for row in training_records(
+            request,
+            None,
+            None,
+            None,
+            None,
+            [],
+            False,
+            body.include_agentic,
+            selection=selection,
+            include_history=body.include_history,
+            include_review=body.include_review,
+            reviewer_origin=body.reviewer_origin,
+            agent_labeler_ids=body.agent_labeler_ids,
+        ):
+            yield json.dumps(row, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        records(),
+        media_type="application/x-ndjson",
+        headers={
+            "Content-Disposition": 'attachment; filename="nllint-selection.jsonl"'
+        },
+    )
 
 
 @router.get("/export/{kind}")

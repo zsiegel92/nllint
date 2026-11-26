@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import * as vscode from "vscode";
+import { registerAnnotations } from "./annotations.js";
 import { DiagnosticStore } from "./diagnostics.js";
 import type { Snapshot, WatchMessage } from "./protocol.js";
 import { type TraceLevel, WatchSession } from "./watcher.js";
@@ -27,6 +28,9 @@ export class NLLintManager implements vscode.Disposable {
 	private disposed = false;
 
 	constructor(context: vscode.ExtensionContext) {
+		registerAnnotations(context, (uri, diagnostic) =>
+			this.diagnostics.annotationPair(uri, diagnostic),
+		);
 		this.status.command = "nllint.showOutput";
 		this.status.name = "NLLint";
 		this.subscriptions.push(

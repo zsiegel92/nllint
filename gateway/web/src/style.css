@@ -180,3 +180,26 @@ details pre { max-height: 19rem; overflow: auto; }
 .agent-controls label { display: flex; align-items: center; gap: .5rem; }
 .range-marker[data-reviewed="true"], .range-legend i[data-reviewed="true"] { border-right: 2px solid #253f38; }
 .range-legend i[data-state="agent"] { border-left-color: #8554b3; }
+
+.dataset-actions { border: 1px solid var(--line); border-radius: 8px; padding: .65rem .85rem; margin-block: .6rem; }
+.dataset-actions summary { cursor: pointer; font-weight: 650; }
+.trace-selection { display: inline-flex; align-items: center; gap: .35rem; }
+.eval-counts { display: flex; flex-wrap: wrap; gap: .7rem; }
+.eval-counts div { border: 1px solid var(--line); border-radius: 8px; padding: .6rem .85rem; min-width: 7rem; }
+.eval-counts dd { margin: .2rem 0 0; font-size: 1.3rem; font-weight: 700; }
+
+
+.selection-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem 1rem; margin-block: .65rem; }
+.selection-controls p, .selection-section p { color: var(--muted); margin: .35rem 0; }
+.selection-button-group { display: inline-flex; align-items: stretch; }
+.selection-button-group button:first-child { border-radius: 6px 0 0 6px; }
+.selection-button-group button:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+.selection-section { padding-block: .8rem; border-top: 1px solid var(--line); }
+
+.pipeline-verdict, .annotation-verdict { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .3rem .5rem; }
+.annotation-verdict {
+  border: 1px solid #a7bac7; background: #edf5fa; color: #234456;
+  border-radius: 6px; padding: .28rem .45rem; font-size: .78rem; line-height: 1.25;
+}
+.annotation-verdict > span { overflow-wrap: anywhere; }
+.stage-range > .annotation-verdict { margin-top: .3rem; }

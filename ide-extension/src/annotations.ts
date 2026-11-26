@@ -3,9 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import * as vscode from "vscode";
 
-export const annotationPairs = new WeakMap<vscode.Diagnostic, number>();
-
-export function registerAnnotations(context: vscode.ExtensionContext): void {
+export function registerAnnotations(
+	context: vscode.ExtensionContext,
+	pairFor: (
+		uri: vscode.Uri,
+		diagnostic: vscode.Diagnostic,
+	) => number | undefined,
+): void {
 	context.subscriptions.push(
 		vscode.languages.registerCodeActionsProvider(
 			{ scheme: "file" },
@@ -13,7 +17,7 @@ export function registerAnnotations(context: vscode.ExtensionContext): void {
 				provideCodeActions(document, _range, context) {
 					if (!vscode.workspace.isTrusted || document.isDirty) return [];
 					return context.diagnostics.flatMap((diagnostic) => {
-						const pair = annotationPairs.get(diagnostic);
+						const pair = pairFor(document.uri, diagnostic);
 						if (pair === undefined) return [];
 						return [true, false].map((decision) => {
 							const title = decision

@@ -309,7 +309,12 @@ async fn lint_file(context: Arc<FileContext>, job: FileJob) -> anyhow::Result<Fi
                 context.prompt_hash.clone(),
             ];
             hash::key(
-                "file-rule-v2",
+                // Older gateways can cache findings that do not identify an annotatable pair.
+                if context.sync.pair_ids == Some(true) {
+                    "file-rule-v3"
+                } else {
+                    "file-rule-v2"
+                },
                 &(
                     &context.provider.namespace,
                     &context.sync.version,

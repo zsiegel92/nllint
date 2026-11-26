@@ -1,6 +1,7 @@
 import asyncio
 import os
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -10,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers
 from starlette.routing import Route
 
-from . import agentic, auth, headless, lint, review
+from . import agentic, auth, evaluation, headless, lint, review
 from .db import Database
 from .jobs import Worker, stop_workers
 from .providers import Providers
@@ -57,6 +58,7 @@ app.include_router(auth.session_router)
 app.include_router(lint.router)
 app.include_router(review.router)
 app.include_router(agentic.router)
+app.include_router(evaluation.router)
 app.include_router(headless.router)
 
 
@@ -87,6 +89,7 @@ if WEB.is_dir():
     @app.get("/traces/{path:path}", include_in_schema=False)
     @app.get("/pipelines", include_in_schema=False)
     @app.get("/pipelines/{path:path}", include_in_schema=False)
+    @app.get("/eval-sets", include_in_schema=False)
     @app.get("/agentic-labelers", include_in_schema=False)
     @app.get("/api-keys", include_in_schema=False)
     @app.get("/find-ranges/{path:path}", include_in_schema=False)
@@ -124,7 +127,7 @@ class McpTransport:
             )
             await response(scope, receive, send)
             return
-        scope.setdefault("state", {})["principal"] = actor
+        scope.setdefault("state", {})["principal"] = replace(actor, origin="mcp")
         await state.mcp_app(scope, receive, send)
 
 
