@@ -46,8 +46,28 @@ class GatewayTest(unittest.TestCase):
         }
         calls = []
 
-        async def decisions(_, batch, state, instructions, stage, metadata, route):
+        async def fake_response():
+            return httpx.Response(
+                200,
+                json={
+                    "id": "mock-request",
+                    "model": "resolved-model",
+                    "usage": {
+                        "prompt_tokens": 12,
+                        "completion_tokens": 3,
+                        "cost": 0.001,
+                    },
+                },
+            )
+
+        async def decisions(
+            _, batch, state, instructions, stage, metadata, route, *, audit=None
+        ):
             calls.append((stage, len(instructions), route["model"]))
+            assert audit is not None
+            await audit.record(
+                {"model": route["model"], "questions": instructions}, fake_response
+            )
             return {
                 key: (
                     ("detect" in instruction)
@@ -59,8 +79,13 @@ class GatewayTest(unittest.TestCase):
                 for key, instruction in instructions.items()
             }
 
-        async def candidates(_, batch, pair, route):
+        async def candidates(_, batch, pair, route, *, audit=None):
             calls.append(("ranges", pair["rule_path"], route["model"]))
+            assert audit is not None
+            await audit.record(
+                {"model": route["model"], "service_tier": route["service_tier"]},
+                fake_response,
+            )
             return [LineRange(start=2, end=3), LineRange(start=5, end=5)], route[
                 "model"
             ]
@@ -102,12 +127,49 @@ class GatewayTest(unittest.TestCase):
             first, second = trace["cells"]
             self.assertEqual(first["ranges"][0]["preview"], "b\nc")
             self.assertEqual(ready[1]["ranges"], [])
+            for issue in ("file-range-positives", "adjudicated-positives"):
+                filtered = self.json(
+                    client.get(
+                        "/api/traces", params={"issue": issue, "trace_id": trace_id}
+                    )
+                )
+                self.assertEqual(
+                    [trace["id"] for trace in filtered["traces"]], [trace_id]
+                )
+                clean = self.json(
+                    client.get(
+                        "/api/traces", params={"issue": issue, "rule": "rules/b.md"}
+                    )
+                )
+                self.assertEqual(clean["traces"], [])
+
+            history_path = f"/api/runs/{first['run_id']}/provider-requests"
+            history = self.json(client.get(history_path))
+            self.assertEqual(len(history["requests"]), 3)
+            self.assertEqual(history["settings"]["ranges"]["service_tier"], "flex")
+            self.assertEqual(history["requests"][0]["question_count"], 2)
+            self.assertEqual(history["requests"][1]["usage"]["cost"], 0.001)
+            self.assertEqual(
+                history["requests"][1]["request_options"]["service_tier"], "flex"
+            )
+            self.assertTrue(all(not item["reused"] for item in history["requests"]))
 
             renamed = self.submit(client, key, {**data, "path": "renamed.py"})
             self.assertEqual(self.wait(client, key, renamed), ready)
             self.assertEqual(
                 len(calls), 3, "a different path reused the three model stages"
             )
+
+            renamed_view = self.json(client.get(f"/api/traces?trace_id={renamed}"))[
+                "traces"
+            ][0]
+            renamed_run = renamed_view["cells"][0]["run_id"]
+            reused = self.json(client.get(f"/api/runs/{renamed_run}/provider-requests"))
+            self.assertEqual(
+                [item["id"] for item in reused["requests"]],
+                [item["id"] for item in history["requests"]],
+            )
+            self.assertTrue(all(item["reused"] for item in reused["requests"]))
 
             self.json(
                 client.put(
@@ -174,6 +236,7 @@ class GatewayTest(unittest.TestCase):
                 client.get("/v1/sync", headers=key, params={"project": "demo"})
             )
             self.assertNotEqual(new_version["version"], since["version"])
+            self.assertEqual(self.json(client.get(history_path)), history)
             self.wait(client, key, self.submit(client, key, data))
             self.assertTrue(
                 any(
@@ -188,6 +251,7 @@ class GatewayTest(unittest.TestCase):
             self.assertEqual(
                 client.get(f"/api/runs/{first['run_id']}").status_code, 404
             )
+            self.assertEqual(client.get(history_path).status_code, 404)
             self.assertEqual(client.get(path).status_code, 404)
             self.assertEqual(
                 client.get(f"/v1/lint/{trace_id}", headers=other_key).status_code, 404

@@ -30,6 +30,10 @@ CELL = """
 
 FILTERS = {
     "all": "TRUE",
+    "file-range-positives": """q.decision AND EXISTS (
+        SELECT 1 FROM range_candidates c WHERE c.run_id=r.id)""",
+    "adjudicated-positives": """EXISTS (
+        SELECT 1 FROM questions a WHERE a.run_id=r.id AND a.stage='adjudication' AND a.decision)""",
     "no-ranges": """q.decision AND r.stage='ready'
         AND NOT EXISTS (SELECT 1 FROM range_candidates c WHERE c.run_id=r.id)""",
     "all-rejected": """q.decision AND r.stage='ready'
@@ -167,6 +171,8 @@ async def update_routing(project_id: int, body: RoutingEdit, request: Request):
         if project is None:
             raise HTTPException(404, "Project not found")
         updated = routing.update(project["routing"], body)
+        effective = routing.effective(updated)
+        await routing.snapshot(conn, project_id, routing.version(effective), effective)
         await conn.execute(
             "UPDATE projects SET routing=$2 WHERE id=$1", project_id, updated
         )
@@ -325,6 +331,58 @@ async def detail(run_id: int, request: Request):
     if settings.langfuse_project_id:
         langfuse_url = f"{settings.langfuse_base_url.rstrip('/')}/project/{settings.langfuse_project_id}/traces/{trace}"
     return {**dict(row), **dict(source), "ranges": ranges, "langfuse_url": langfuse_url}
+
+
+@router.get("/runs/{run_id}/provider-requests")
+async def provider_requests(run_id: int, request: Request):
+    async with request_db(request, readonly=True) as conn:
+        snapshot = await conn.fetchrow(
+            """
+            SELECT v.id,v.version,v.routing FROM runs r
+            JOIN provider_versions v ON v.id=r.provider_version_id
+            WHERE r.id=$1
+        """,
+            run_id,
+        )
+        if snapshot is None:
+            raise HTTPException(404, "Run not found")
+        rows = await conn.fetch(
+            """
+            SELECT p.id,p.provider_version_id,p.stage,p.started_at,p.question_count,
+                   p.request_options, NOT (p.run_ids @> ARRAY[$1::bigint]) AS reused,
+                   o.finished_at,o.http_status,o.transport_error,o.upstream_request_id,
+                   o.resolved_model,o.resolved_service_tier,o.usage
+            FROM provider_requests p
+            LEFT JOIN provider_request_results o ON o.request_id=p.id
+            WHERE p.run_ids @> ARRAY[$1::bigint] OR p.id IN (
+                SELECT provider_request_id FROM questions WHERE run_id=$1
+            )
+            ORDER BY p.started_at,p.id
+        """,
+            run_id,
+        )
+    settings = request.app.state.routing.decode(snapshot["routing"])
+    requests = [
+        {
+            **dict(row),
+            "request_options": json.loads(row["request_options"]),
+            "usage": json.loads(row["usage"]) if row["usage"] is not None else None,
+        }
+        for row in rows
+    ]
+    return {
+        "settings_version_id": snapshot["id"],
+        "settings_version": snapshot["version"],
+        "settings": {
+            kind: {
+                key: route[key]
+                for key in ("base_url", "model", "service_tier")
+                if key in route
+            }
+            for kind, route in settings.items()
+        },
+        "requests": requests,
+    }
 
 
 async def lock_pair(conn, pair_id):

@@ -7,6 +7,7 @@ import httpx
 from langfuse import Langfuse
 
 from .contracts import NumberedRanges, source_lines
+from .provider_audit import ProviderAudit
 from .settings import Settings
 
 
@@ -49,6 +50,8 @@ class Providers:
         stage: str,
         metadata: dict,
         route: dict,
+        *,
+        audit: ProviderAudit | None = None,
     ):
         model = route["model"]
         questions = {
@@ -63,10 +66,11 @@ class Providers:
             for key, instruction in instructions.items()
         }
         with self.observation(batch, stage, model, metadata) as observation:
-            response = await self.http.post(
-                f"{route['base_url']}/v1/systemone",
-                headers={"Authorization": f"Bearer {route['api_key']}"},
-                json={"model": model, "state": state, "questions": questions},
+            response = await self.post(
+                route,
+                "v1/systemone",
+                {"model": model, "state": state, "questions": questions},
+                audit,
             )
             payload = response.raise_for_status().json()
             model = str(payload.get("model") or model)
@@ -86,7 +90,9 @@ class Providers:
                 observation.update(output=results, model=model)
             return results
 
-    async def candidates(self, batch: str, pair, route: dict):
+    async def candidates(
+        self, batch: str, pair, route: dict, *, audit: ProviderAudit | None = None
+    ):
         model = route["model"]
         lines = source_lines(pair["source"])
         if not lines:
@@ -143,14 +149,12 @@ class Providers:
                 },
             },
         }
+        if service_tier := route.get("service_tier"):
+            body["service_tier"] = service_tier
         with self.observation(
             batch, "range-candidates", model, {"pair_id": pair["pair_id"]}
         ) as observation:
-            response = await self.http.post(
-                f"{route['base_url']}/chat/completions",
-                headers={"Authorization": f"Bearer {route['api_key']}"},
-                json=body,
-            )
+            response = await self.post(route, "chat/completions", body, audit)
             payload = response.raise_for_status().json()
             ranges = NumberedRanges.model_validate_json(
                 payload["choices"][0]["message"]["content"]
@@ -161,3 +165,15 @@ class Providers:
                     output=[region.model_dump() for region in ranges], model=model
                 )
             return ranges, model
+
+    async def post(
+        self, route: dict, endpoint: str, body: dict, audit: ProviderAudit | None
+    ) -> httpx.Response:
+        async def send():
+            return await self.http.post(
+                f"{route['base_url']}/{endpoint}",
+                headers={"Authorization": f"Bearer {route['api_key']}"},
+                json=body,
+            )
+
+        return await audit.record(body, send) if audit else await send()

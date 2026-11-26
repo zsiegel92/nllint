@@ -8,8 +8,12 @@
     "build": "tsc --noEmit && vite build"
   },
   "dependencies": {
+    "highlight.js": "^11.12.0",
+    "lowlight": "^3.3.0",
+    "nuqs": "^2.10.3",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-router": "^8.5.3"
   },
   "devDependencies": {
     "@types/node": "^26.6.10",

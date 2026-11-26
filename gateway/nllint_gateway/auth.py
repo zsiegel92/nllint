@@ -176,9 +176,16 @@ async def github_start(request: Request):
         raise HTTPException(404, "GitHub sign-in is disabled")
     destination = request.query_params.get("next", "/")
     if (
-        (destination != "/" and not destination.startswith("/?"))
+        len(destination) > 2048
+        or not destination.startswith("/")
+        or destination.startswith("//")
         or "\\" in destination
         or any(ord(char) < 32 for char in destination)
+    ):
+        destination = "/"
+    path = urlsplit(destination).path
+    if path not in {"/", "/traces", "/pipelines", "/api-keys"} and not path.startswith(
+        ("/traces/", "/pipelines/", "/find-ranges/")
     ):
         destination = "/"
     callback_host = urlsplit(settings.nllint_app_url).hostname

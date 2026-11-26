@@ -7,6 +7,7 @@ from httpx import HTTPStatusError
 
 from .contracts import source_lines
 from .db import notify_work
+from .provider_audit import ProviderAudit
 
 LOG = logging.getLogger(__name__)
 DETAILS = """
@@ -157,6 +158,16 @@ class Worker:
             )
         return True
 
+    def audit(self, row, stage: str, run_ids: list[int]) -> ProviderAudit:
+        return ProviderAudit(
+            self.db,
+            row["user_id"],
+            row["provider_version_id"],
+            row["batch_id"],
+            stage,
+            run_ids,
+        )
+
     async def file_candidates(self, conn, rows):
         sample = rows[0]
         prompt = {
@@ -167,16 +178,19 @@ class Worker:
         for row in rows:
             groups.setdefault(row["cache_identity"], []).append(row)
         answers = {}
+        request_ids: dict[str, int | None] = {}
         for content, group in groups.items():
             cached = await conn.fetchrow(
                 """
-                SELECT q.decision,q.confidence,q.model FROM runs r JOIN questions q ON q.run_id=r.id
+                SELECT q.decision,q.confidence,q.model,q.provider_request_id FROM runs r JOIN questions q ON q.run_id=r.id
                 WHERE r.cache_identity=$1 AND q.stage='file' ORDER BY r.id LIMIT 1
             """,
                 content,
             )
             if cached:
-                answers[str(group[0]["id"])] = (
+                answer_key = str(group[0]["id"])
+                request_ids[answer_key] = cached["provider_request_id"]
+                answers[answer_key] = (
                     cached["decision"],
                     cached["confidence"],
                     cached["model"],
@@ -193,6 +207,16 @@ class Worker:
             }
             await self.reserve("decision")
             route = self.routing.decode(sample["provider_routing"])["decision"]
+            audit = self.audit(
+                sample,
+                "file",
+                [
+                    row["id"]
+                    for group in groups.values()
+                    if str(group[0]["id"]) in missing
+                    for row in group
+                ],
+            )
             answers.update(
                 await self.providers.decisions(
                     sample["batch_id"],
@@ -206,24 +230,32 @@ class Worker:
                         },
                     },
                     route,
+                    audit=audit,
                 )
             )
+            request_ids.update((key, audit.request_id) for key in missing)
         for group in groups.values():
-            decision, confidence, model = answers[str(group[0]["id"])]
+            key = str(group[0]["id"])
+            decision, confidence, model = answers[key]
             for row in group:
-                await self.store_file_candidate(conn, row, decision, confidence, model)
+                await self.store_file_candidate(
+                    conn, row, decision, confidence, model, request_ids[key]
+                )
 
-    async def store_file_candidate(self, conn, row, decision, confidence, model):
+    async def store_file_candidate(
+        self, conn, row, decision, confidence, model, request_id
+    ):
         run_id = row["id"]
         await conn.execute(
             """
-            INSERT INTO questions(run_id, stage, decision, confidence, model)
-            VALUES ($1,'file',$2,$3,$4)
+            INSERT INTO questions(run_id, stage, decision, confidence, model, provider_request_id)
+            VALUES ($1,'file',$2,$3,$4,$5)
         """,
             run_id,
             decision,
             confidence,
             model,
+            request_id,
         )
         stage = "ranges" if decision or row["file_label"] else "ready"
         available = None
@@ -242,13 +274,14 @@ class Worker:
             return
         cached = await conn.fetchrow(
             """
-            SELECT q.run_id,q.model FROM runs r JOIN questions q ON q.run_id=r.id
+            SELECT q.run_id,q.model,q.provider_request_id FROM runs r JOIN questions q ON q.run_id=r.id
             WHERE r.cache_identity=$1 AND q.stage='ranges' ORDER BY r.id LIMIT 1
         """,
             row["cache_identity"],
         )
         if cached:
             model = cached["model"]
+            request_id = cached["provider_request_id"]
             entries = await conn.fetch(
                 """
                 SELECT start_line,end_line FROM range_candidates WHERE run_id=$1
@@ -259,12 +292,17 @@ class Worker:
         else:
             await self.reserve("ranges")
             route = self.routing.decode(row["provider_routing"])["ranges"]
-            ranges, model = await self.providers.candidates(row["batch_id"], row, route)
+            audit = self.audit(row, "ranges", [row["id"]])
+            ranges, model = await self.providers.candidates(
+                row["batch_id"], row, route, audit=audit
+            )
+            request_id = audit.request_id
             bounds = [(region.start, region.end) for region in ranges]
         await conn.execute(
-            "INSERT INTO questions(run_id, stage, model) VALUES ($1,'ranges',$2)",
+            "INSERT INTO questions(run_id, stage, model, provider_request_id) VALUES ($1,'ranges',$2,$3)",
             row["id"],
             model,
+            request_id,
         )
         await conn.executemany(
             """
@@ -279,9 +317,9 @@ class Worker:
         lines = source_lines(source)
         await conn.execute(
             """
-            INSERT INTO questions(run_id,stage,start_line,end_line,decision,confidence,model)
+            INSERT INTO questions(run_id,stage,start_line,end_line,decision,confidence,model,provider_request_id)
             SELECT DISTINCT ON (q.start_line,q.end_line)
-                $1::bigint,'adjudication',q.start_line,q.end_line,q.decision,q.confidence,q.model
+                $1::bigint,'adjudication',q.start_line,q.end_line,q.decision,q.confidence,q.model,q.provider_request_id
             FROM runs r JOIN questions q ON q.run_id=r.id AND q.stage='adjudication'
             JOIN range_candidates c ON c.run_id=$1 AND (c.start_line,c.end_line)=(q.start_line,q.end_line)
             WHERE r.cache_identity=$2 AND r.id<>$1
@@ -319,6 +357,7 @@ class Worker:
             }
             await self.reserve("decision")
             route = self.routing.decode(row["provider_routing"])["decision"]
+            audit = self.audit(row, "adjudication", [row["id"]])
             answers = await self.providers.decisions(
                 row["batch_id"],
                 state,
@@ -334,14 +373,21 @@ class Worker:
                     "pair_id": row["pair_id"],
                 },
                 route,
+                audit=audit,
             )
             await conn.executemany(
                 """
-                INSERT INTO questions(run_id,stage,start_line,end_line,decision,confidence,model)
-                VALUES ($1,'adjudication',$2,$3,$4,$5,$6)
+                INSERT INTO questions(run_id,stage,start_line,end_line,decision,confidence,model,provider_request_id)
+                VALUES ($1,'adjudication',$2,$3,$4,$5,$6,$7)
             """,
                 [
-                    (row["id"], region["start"], region["end"], *answers[key])
+                    (
+                        row["id"],
+                        region["start"],
+                        region["end"],
+                        *answers[key],
+                        audit.request_id,
+                    )
                     for key, region in snippets.items()
                 ],
             )

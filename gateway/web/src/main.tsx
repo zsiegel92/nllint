@@ -1,43 +1,48 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import type {FormEvent} from 'react';
 import {createRoot} from 'react-dom/client';
+import {useQueryStates} from 'nuqs';
+import {BrowserRouter, Link, matchRoutes, useLocation, useNavigate} from 'react-router';
+import {NuqsAdapter} from 'nuqs/adapters/react-router/v7';
+import {closedReview, findRangesPath, gatewayQuery, issueLabels, modelsPath, modes, navigation, rangeParam, routes, sectionPaths, tracePath} from './navigation';
 import {Api} from './api';
 import type {Cell, Key, Label, Mode, Project, Provider, ProviderEdit, Range, Routing, Run, Trace} from './api';
+import type {Section} from './navigation';
+import {isLanguage, languageForPath} from './code';
 import {Matrix, ReviewPanel} from './review';
 import './style.css';
 
-const url = new URLSearchParams(location.search);
-const traceId = url.get('traceId');
-const findRun = url.get('findRun');
 const pageSize = 20;
 const devVerifierKey = 'nllint.dev-verifier';
+const devReturnKey = 'nllint.dev-return';
 
 function base64Url(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 }
-const issues = {
-  all: 'All traces',
-  'no-ranges': 'Positive file, no ranges',
-  'all-rejected': 'Positive file, all ranges rejected',
-  disagreements: 'Human and model disagree',
-  'rejected-candidates': 'Rejected candidates',
-  unreviewed: 'Unreviewed decisions',
-  failed: 'Processing failed',
-};
-
 function App() {
+  const location = useLocation();
+  const matched = matchRoutes([...routes], location)?.at(-1);
   const [authenticated, setAuthenticated] = useState<boolean>();
   const api = useMemo(() => new Api(), []);
   const [loginError, setLoginError] = useState('');
   useEffect(() => {
     async function checkSession() {
-      const ticket = new URLSearchParams(location.hash.slice(1)).get('dev_ticket');
+      const current = window.location;
+      const ticket = new URLSearchParams(current.hash.slice(1)).get('dev_ticket');
       if (ticket) {
-        history.replaceState(null, '', location.pathname + location.search);
+        history.replaceState(history.state, '', current.pathname + current.search);
         const verifier = sessionStorage.getItem(devVerifierKey);
+        const destination = sessionStorage.getItem(devReturnKey);
         sessionStorage.removeItem(devVerifierKey);
+        sessionStorage.removeItem(devReturnKey);
         if (!verifier) throw new Error('Start remote sign-in again in this tab.');
         await api.request('/session/dev/exchange', 'POST', {ticket, verifier});
+        if (destination?.startsWith('/') && !destination.startsWith('//')
+          && new URL(destination, current.origin).origin === current.origin
+          && destination !== current.pathname + current.search) {
+          current.replace(destination);
+          return;
+        }
       }
       const session = await api.json<{authenticated: boolean}>('/session');
       setAuthenticated(session.authenticated);
@@ -46,10 +51,18 @@ function App() {
   }, [api]);
   if (authenticated === undefined) return <main className="entry"><p role="status">Checking session…</p></main>;
   if (!authenticated) return <Login api={api} initialError={loginError} login={() => setAuthenticated(true)}/>;
-  if (findRun) return <FindRanges api={api} run={findRun}/>;
-  return <Workspace api={api} logout={() => {
-    api.request('/session', 'DELETE').then(() => setAuthenticated(false));
-  }}/>;
+  if (!matched) return <main className="entry"><section className="entry-card">
+    <h1>Page not found</h1><Link to="/traces">Back to traces</Link>
+  </section></main>;
+  if (matched.route.id === 'home') return <LegacyHome api={api}/>;
+  if (matched.route.id === 'find') return <FindRanges api={api} run={matched.params.runId ?? ''}/>;
+  const section: Section = matched.route.id === 'keys' ? 'keys'
+    : matched.route.id === 'projects' || matched.route.id === 'models' ? 'projects' : 'traces';
+  return <Workspace api={api} section={section} project={matched.params.projectId ?? ''}
+    traceId={matched.params.traceId} models={matched.params.pipelineId} logout={() => {
+      api.request('/session', 'DELETE').then(() => setAuthenticated(false));
+    }}/>;
+
 }
 
 type SignInMethod = {github: boolean; app_url: string; remote_dev_origin: string | null};
@@ -68,6 +81,7 @@ function Login({api, login, initialError}: {api: Api; login: () => void; initial
       const verifier = base64Url(crypto.getRandomValues(new Uint8Array(32)));
       const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
       sessionStorage.setItem(devVerifierKey, verifier);
+      sessionStorage.setItem(devReturnKey, location.pathname + location.search);
       const start = new URL('/api/session/github/start', method.app_url);
       start.searchParams.set('dev_challenge', base64Url(new Uint8Array(hash)));
       location.assign(start);
@@ -100,7 +114,41 @@ function Login({api, login, initialError}: {api: Api; login: () => void; initial
   </form></main>;
 }
 
+function LegacyHome({api}: {api: Api}) {
+  const {search} = useLocation();
+  const navigate = useNavigate();
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    async function redirect() {
+      const params = new URLSearchParams(search);
+      const section = params.get('section');
+      const traceId = params.get('traceId');
+      const project = params.get('project') ?? '';
+      const models = params.get('models');
+      const findRun = params.get('findRun');
+      for (const name of ['section', 'traceId', 'project', 'models', 'findRun']) params.delete(name);
+      let path = tracePath(project);
+      if (findRun) path = findRangesPath(encodeURIComponent(findRun));
+      else if (section === 'keys') path = sectionPaths.keys;
+      else if (section === 'projects') path = models && /^\d+$/.test(models) ? modelsPath(models) : sectionPaths.projects;
+      else if (traceId) {
+        const result = await api.json<{traces: Trace[]}>(`/traces?${new URLSearchParams({trace_id: traceId})}`);
+        if (!result.traces[0]) throw new Error('Trace not found');
+        path = tracePath(result.traces[0].project, traceId);
+      }
+      if (active) void navigate(params.size ? `${path}?${params}` : path, {replace: true});
+    }
+    redirect().catch(error => {if (active) setError(error.message);});
+    return () => {active = false;};
+  }, [api, navigate, search]);
+  return <main className="entry"><section className="entry-card">
+    {error ? <><p role="alert">{error}</p><Link to="/traces">Back to traces</Link></> : <p role="status">Opening view…</p>}
+  </section></main>;
+}
+
 function FindRanges({api, run}: {api: Api; run: string}) {
+  const navigate = useNavigate();
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
@@ -109,7 +157,11 @@ function FindRanges({api, run}: {api: Api; run: string}) {
     async function wait(trace: string) {
       const result = await api.json<Run>(`/runs/${encodeURIComponent(run)}`);
       if (!active) return;
-      if (result.stage === 'ready') location.replace(`/?traceId=${encodeURIComponent(trace)}&run=${encodeURIComponent(run)}`);
+      if (result.stage === 'ready') {
+        const view = await api.json<{traces: Trace[]}>(`/traces?${new URLSearchParams({trace_id: trace})}`);
+        if (!view.traces[0]) throw new Error('Trace not found');
+        if (active) void navigate(gatewayQuery(tracePath(view.traces[0].project, trace), {run: Number(run)}), {replace: true});
+      }
       else if (result.stage === 'failed') {
         throw new Error(`Range processing failed${result.error ? ` (${result.error})` : ''}.`);
       } else timer = window.setTimeout(() => wait(trace).catch(fail), 1400);
@@ -118,7 +170,7 @@ function FindRanges({api, run}: {api: Api; run: string}) {
     api.json<{trace_id: string}>(`/runs/${encodeURIComponent(run)}/find-ranges`, 'POST')
       .then(result => {if (active) return wait(result.trace_id);}).catch(fail);
     return () => {active = false; clearTimeout(timer);};
-  }, [api, run, attempt]);
+  }, [api, navigate, run, attempt]);
 
   return <main className="entry"><section className="entry-card">
     <div className="brand"><img className="brand-icon" src="/favicon.ico" alt=""/> NLLint Gateway</div>
@@ -127,32 +179,30 @@ function FindRanges({api, run}: {api: Api; run: string}) {
       <p role="alert" className="error">{error}</p>
       <button type="button" onClick={() => {setError(''); setAttempt(value => value + 1);}}>Try again</button>
     </> : <p role="status"><span className="spinner"/> Finding and adjudicating candidate ranges…</p>}
-    <a href="/">Back to traces</a>
+    <Link to="/traces">Back to traces</Link>
   </section></main>;
 }
 
-function Workspace({api, logout}: {api: Api; logout: () => void}) {
-  const [section, setSection] = useState<'traces' | 'keys' | 'projects'>('traces');
-  const [mode, setMode] = useState<Mode>('adjudication');
-  const [issue, setIssue] = useState('all');
-  const [key, setKey] = useState('');
-  const [project, setProject] = useState('');
-  const [rule, setRule] = useState('');
-  const [page, setPage] = useState(0);
+function Workspace({api, logout, section, project, traceId, models}: {
+  api: Api; logout: () => void; section: Section; project: string; traceId?: string; models?: string;
+}) {
+  const navigate = useNavigate();
+  const [query, setQuery] = useQueryStates(navigation, {history: 'push'});
+  const {mode, issue, key, rule, exportKind} = query;
+  const page = Math.max(0, query.page);
+  const selectedTrace = query.reviewTrace ?? traceId;
   const [keys, setKeys] = useState<Key[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [filteredProjects, setFilteredProjects] = useState<Project[]>([]);
-  const [routingProject, setRoutingProject] = useState<Project>();
+  const routingProject = projects.find(item => String(item.id) === models);
   const [projectName, setProjectName] = useState('');
   const [data, setData] = useState<{traces: Trace[]; more: boolean}>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [reload, setReload] = useState(0);
-  const [exportKind, setExportKind] = useState('adjudication');
-  const [active, setActive] = useState<{trace: Trace; cell: Cell; range?: Range; view?: Mode}>();
-  const opened = useMemo(() => ({value: false}), []);
+  const [fallbackTrace, setFallbackTrace] = useState<Trace>();
   const refresh = useCallback(() => setReload(value => value + 1), []);
-  const close = useCallback(() => setActive(undefined), []);
+  const close = useCallback(() => {void setQuery(closedReview);}, [setQuery]);
 
   useEffect(() => {
     let mounted = true;
@@ -191,13 +241,6 @@ function Workspace({api, logout}: {api: Api; logout: () => void}) {
       api.json<{traces: Trace[]; more: boolean}>(`/traces?${params}`).then(next => {
         if (!mounted) return;
         setData(next);
-        const wanted = url.get('run');
-        if (wanted && !opened.value && next.traces.length) {
-          const trace = next.traces[0];
-          const cell = trace.cells.find(cell => String(cell.run_id) === wanted);
-          if (cell) setActive({trace, cell});
-          opened.value = true;
-        }
         if (next.traces.some(trace => trace.cells.some(cell => !['ready', 'failed'].includes(cell.stage)))) {
           timer = window.setTimeout(fetchData, 2200);
         }
@@ -205,11 +248,10 @@ function Workspace({api, logout}: {api: Api; logout: () => void}) {
     }
     fetchData();
     return () => {mounted = false; clearTimeout(timer);};
-  }, [api, issue, opened, page, reload, scope, section]);
+  }, [api, issue, page, reload, scope, section, traceId]);
 
   function changeMode(next: Mode) {
-    setMode(next);
-    setActive(current => current ? {...current, view: undefined} : undefined);
+    void setQuery({mode: next, review: null});
   }
 
   function saveRange(cell: Cell, range: Range, decision: Label) {
@@ -232,8 +274,7 @@ function Workspace({api, logout}: {api: Api; logout: () => void}) {
     setError('');
     api.json<Project>('/projects', 'POST', {name: projectName.trim()}).then(created => {
       setProjectName('');
-      setKey('');
-      setRoutingProject(created);
+      void navigate(gatewayQuery(modelsPath(created.id), {...query, key: ''}));
       refresh();
     }).catch(error => setError(error.message)).finally(() => setBusy(false));
   }
@@ -255,8 +296,29 @@ function Workspace({api, logout}: {api: Api; logout: () => void}) {
   }
 
   const traces = data?.traces ?? [];
-  const current = active && (traces.find(trace => trace.id === active.trace.id)?.cells
-    .find(cell => cell.run_id === active.cell.run_id) ?? active.cell);
+  const visibleTrace = traces.find(trace => trace.id === selectedTrace);
+  const visibleRun = visibleTrace?.cells.find(cell => cell.run_id === query.run);
+  useEffect(() => {
+    if (section !== 'traces' || !query.run || !selectedTrace || visibleRun) return;
+    let active = true;
+    api.json<{traces: Trace[]}>(`/traces?${new URLSearchParams({trace_id: selectedTrace})}`)
+      .then(result => {if (active) setFallbackTrace(result.traces[0]);})
+      .catch(error => {if (active) setError(error.message);});
+    return () => {active = false;};
+  }, [api, query.run, reload, section, selectedTrace, visibleRun]);
+  const activeTrace = visibleRun ? visibleTrace : fallbackTrace?.id === selectedTrace ? fallbackTrace : undefined;
+  const current = activeTrace?.cells.find(cell => cell.run_id === query.run);
+  const active = activeTrace && current ? {trace: activeTrace, cell: current} : undefined;
+  const language = query.syntax && isLanguage(query.syntax) ? query.syntax : undefined;
+  const open = (trace: Trace, cell: Cell, range?: Range, view?: Mode) => {
+    const sameFile = selectedTrace === trace.id;
+    void setQuery({
+      run: cell.run_id, reviewTrace: traceId === trace.id ? null : trace.id,
+      review: view ?? null, range: range ? rangeParam(range) : null,
+      syntax: sameFile ? query.syntax : null, context: sameFile ? query.context : null,
+      ruleHistory: null, providerRequests: null,
+    });
+  };
   const reviewOrder = [...new Map(traces.flatMap(trace =>
     trace.cells.filter(cell => cell.ranges.length).map(cell => [cell.run_id, {trace, cell}] as const)
   )).values()];
@@ -268,15 +330,15 @@ function Workspace({api, logout}: {api: Api; logout: () => void}) {
     const next = adjacent(direction);
     if (!next) return;
     const range = direction < 0 ? next.cell.ranges.at(-1) : next.cell.ranges[0];
-    setActive({...next, range, view: 'adjudication'});
+    open(next.trace, next.cell, range, 'adjudication');
   }
   return <>
     <header className="topbar">
-      <a className="brand" href="/"><img className="brand-icon" src="/favicon.ico" alt=""/> NLLint Gateway</a>
+      <Link className="brand" to="/traces"><img className="brand-icon" src="/favicon.ico" alt=""/> NLLint Gateway</Link>
       <nav aria-label="Workspace">
-        <button type="button" aria-pressed={section === 'traces'} onClick={() => setSection('traces')}>Traces</button>
-        <button type="button" aria-pressed={section === 'projects'} onClick={() => setSection('projects')}>Pipelines</button>
-        <button type="button" aria-pressed={section === 'keys'} onClick={() => setSection('keys')}>API keys</button>
+        <Link to="/traces" aria-current={section === 'traces' ? 'page' : undefined}>Traces</Link>
+        <Link to="/pipelines" aria-current={section === 'projects' ? 'page' : undefined}>Pipelines</Link>
+        <Link to="/api-keys" aria-current={section === 'keys' ? 'page' : undefined}>API keys</Link>
       </nav>
       <button className="quiet" type="button" onClick={logout}>Sign out</button>
     </header>
@@ -286,9 +348,12 @@ function Workspace({api, logout}: {api: Api; logout: () => void}) {
         {section === 'traces' && <>
           <div className="page-heading">
             <h1>{traceId ? 'Trace review' : 'Lint traces'}</h1>
-            <div className="export">
-              <label className="sr-only" htmlFor="dataset">Dataset</label>
-              <select id="dataset" value={exportKind} onChange={event => setExportKind(event.target.value)}>
+            <div className="export" role="group" aria-label="Export dataset">
+              <label className="sr-only" htmlFor="dataset">Dataset to export</label>
+              <select id="dataset" value={exportKind} onChange={event => {
+                const value = modes.find(mode => mode === event.target.value);
+                if (value) void setQuery({exportKind: value});
+              }}>
                 <option value="adjudication">Adjudication examples</option>
                 <option value="files">File decisions</option>
                 <option value="ranges">Range examples</option>
@@ -296,18 +361,18 @@ function Workspace({api, logout}: {api: Api; logout: () => void}) {
               <button type="button" onClick={download}>Export JSONL</button>
             </div>
           </div>
-          {traceId && <a href="/">← All traces</a>}
+          {traceId && <Link to={gatewayQuery(tracePath(project), {...query, ...closedReview, page: null})}>← Project traces</Link>}
           <div className="filters">
-            <label>Project<select value={project} onChange={event => {setPage(0); setProject(event.target.value);}}>
+            <label>Find<select value={issue} onChange={event => void setQuery({issue: event.target.value, page: null})}>
+              {Object.entries(issueLabels).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
+            </select></label>
+            <label>Project<select value={project} onChange={event => void navigate(gatewayQuery(tracePath(event.target.value), {...query, ...closedReview, page: null}))}>
               <option value="">All projects</option>{projects.map(item => <option key={item.id} value={item.name}>{item.name}</option>)}
             </select></label>
-            <label>API key<select value={key} onChange={event => {setPage(0); setKey(event.target.value);}}>
+            <label>API key<select value={key} onChange={event => void setQuery({key: event.target.value, page: null})}>
               <option value="">All keys</option>{keys.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select></label>
-            <label>Rule path<input value={rule} placeholder="All rules" onChange={event => {setPage(0); setRule(event.target.value);}}/></label>
-            <label>Find<select value={issue} onChange={event => {setPage(0); setIssue(event.target.value);}}>
-              {Object.entries(issues).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
-            </select></label>
+            <label>Rule path<input value={rule} placeholder="All rules" onChange={event => void setQuery({rule: event.target.value, page: null}, {history: 'replace'})}/></label>
           </div>
           <div className="matrix-bar">
             <div className="segmented">
@@ -317,46 +382,59 @@ function Workspace({api, logout}: {api: Api; logout: () => void}) {
             </div>
             <button className="quiet" type="button" onClick={refresh}>Refresh</button>
           </div>
-          {data ? <Matrix traces={traces} mode={mode} open={(trace, cell, range) => setActive({trace, cell, range})}
-            save={saveFile} saveRange={saveRange} busy={busy} onRule={path => {setRule(path); setPage(0);}}/>
+          {data ? <Matrix traces={traces} mode={mode} open={open}
+            languages={selectedTrace && language ? {[selectedTrace]: language} : {}}
+            openFile={(trace, cell) => open(trace, cell, undefined, 'files')}
+            traceLink={trace => gatewayQuery(tracePath(trace.project, trace.id), {...query, ...closedReview, page: null})}
+            save={saveFile} saveRange={saveRange} busy={busy} onRule={path => void setQuery({rule: path, page: null})}/>
             : <p role="status">Loading traces…</p>}
           {!traceId && data && <div className="pagination">
-            <button type="button" disabled={!page} onClick={() => setPage(page - 1)}>← Previous</button>
+            <button type="button" disabled={!page} onClick={() => void setQuery({page: page - 1})}>← Previous</button>
             <span>Page {page + 1}</span>
-            <button type="button" disabled={!data.more} onClick={() => setPage(page + 1)}>Next →</button>
+            <button type="button" disabled={!data.more} onClick={() => void setQuery({page: page + 1})}>Next →</button>
           </div>}
         </>}
         {section === 'keys' && <Keys api={api} keys={keys} refresh={refresh} onError={setError}/>}
         {section === 'projects' && <>
           <h1>Pipelines</h1>
+          <p>Projects group traces and model settings by the client’s <code>project_id</code>. API keys authenticate requests and can be used across projects.</p>
           <form className="create-project" onSubmit={createProject}>
             <label>Project ID<input value={projectName} maxLength={200} required
               onChange={event => setProjectName(event.target.value)}/></label>
             <button className="primary" disabled={busy || !projectName.trim()}>Create project</button>
           </form>
-          <div className="filters"><label>API key<select value={key} onChange={event => setKey(event.target.value)}>
+          <p className="muted">Create a project to configure its models before the first lint. Otherwise, the first lint creates it. A rule history parent adds earlier versions of matching rule paths to Rule history.</p>
+          <div className="filters"><label>Projects with work submitted using API key<select value={key} onChange={event => void setQuery({key: event.target.value, page: null})}>
             <option value="">All keys</option>{keys.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select></label></div>
           {(key ? filteredProjects : projects).length ? <table className="settings-table">
           <thead><tr><th>Project</th><th>Rules</th><th>Inherits rule history from</th><th>Models</th></tr></thead>
           <tbody>{(key ? filteredProjects : projects).map(item => <tr key={item.id}>
-            <th><button className="text-button" type="button" onClick={() => {setProject(item.name); setSection('traces'); setPage(0);}}>{item.name}</button></th>
+            <th><Link to={gatewayQuery(tracePath(item.name), {key})}>{item.name}</Link></th>
             <td>{item.rules}</td>
             <td><select aria-label={`Parent for ${item.name}`} value={item.parent ?? ''} onChange={event => {
               api.request(`/projects/${item.id}/inheritance`, 'PUT', {parent: event.target.value || null})
                 .then(refresh).catch(error => setError(error.message));
             }}><option value="">No parent</option>{projects.filter(parent => parent.id !== item.id).map(parent =>
               <option value={parent.name} key={parent.id}>{parent.name}</option>)}</select></td>
-            <td><button type="button" onClick={() => setRoutingProject(item)}>Configure models</button></td>
-          </tr>)}</tbody></table> : <div className="empty">No pipelines match the selected key.</div>}
+            <td><button type="button" onClick={() => void navigate(gatewayQuery(modelsPath(item.id), {key}))}>Configure models</button></td>
+          </tr>)}</tbody></table> : <div className="empty">{key ? "No projects have work submitted using this API key." : "No projects yet."}</div>}
           {routingProject && <ModelSettings key={routingProject.id} api={api} project={routingProject}
-            close={() => setRoutingProject(undefined)}/>}
+            close={() => void navigate(gatewayQuery(sectionPaths.projects, {key}))}/>}
         </>}
       </section>
-      {section === 'traces' && active && current && <ReviewPanel key={active.cell.run_id} api={api}
-        initial={current} trace={active.trace} initialRange={active.range} mode={active.view ?? mode} close={close}
+      {section === 'traces' && active && <ReviewPanel key={active.cell.run_id} api={api}
+        initial={active.cell} trace={active.trace} mode={query.review ?? mode} close={close}
         refresh={refresh} saveFile={saveFile} busy={busy}
+        language={language ?? languageForPath(active.trace.file_path)}
+        onLanguage={syntax => void setQuery({syntax})}
+        onMode={review => void setQuery({review})}
+        selectedRange={query.range} onRange={range => void setQuery({range: rangeParam(range)})}
+        showContext={query.context} onContext={context => void setQuery({context})}
+        showRuleHistory={query.ruleHistory} onRuleHistory={ruleHistory => void setQuery({ruleHistory})}
+        showProviderHistory={query.providerRequests} onProviderHistory={providerRequests => void setQuery({providerRequests})}
         canGoPrevious={Boolean(adjacent(-1))} canGoNext={Boolean(adjacent(1))} goAdjacent={openAdjacent}/>}
+
     </main>
   </>;
 }
@@ -366,10 +444,12 @@ function editRoute(form: FormData, kind: keyof Routing, existing: Provider): Pro
   const baseURL = String(form.get(kind + '.base') ?? '').trim();
   const model = String(form.get(kind + '.model') ?? '').trim();
   const secret = String(form.get(kind + '.key') ?? '').trim();
+  const tier = form.get(kind + '.tier');
   return {
     ...(baseURL !== existing.base_url ? {base_url: baseURL} : {}),
     ...(model !== existing.model ? {model} : {}),
     ...(secret ? {api_key: secret} : {}),
+    ...((tier === 'flex' || tier === 'fast') && tier !== existing.service_tier ? {service_tier: tier} : {}),
   };
 }
 
@@ -415,6 +495,12 @@ function ModelSettings({api, project, close}: {api: Api; project: Project; close
           <legend>{kind === 'decision' ? 'File decisions and adjudication' : 'Candidate ranges'}</legend>
           <label>Provider base URL<input name={kind + '.base'} type="url" required defaultValue={routing[kind].base_url}/></label>
           <label>Model<input name={kind + '.model'} required defaultValue={routing[kind].model}/></label>
+          {kind === 'ranges' && <label>Service tier
+            <select name={kind + '.tier'} defaultValue={routing.ranges.service_tier ?? 'flex'}>
+              <option value="flex">Flex</option>
+              <option value="fast">Fast</option>
+            </select>
+          </label>}
           <label>API key<input name={kind + '.key'} type="password" autoComplete="new-password"
             placeholder={routing[kind].custom_key ? 'Stored project key' : 'Uses gateway key'}/></label>
           {routing[kind].overridden && <label className="inline-check"><input name={kind + '.reset'} type="checkbox"/> Restore gateway defaults</label>}
@@ -440,6 +526,7 @@ function Keys({api, keys, refresh, onError}: {api: Api; keys: Key[]; refresh: ()
   }
   return <>
     <h1>API keys</h1>
+    <p>Key names are labels for identifying credentials. The client’s project ID determines where lint traces appear.</p>
     <form className="create-key" onSubmit={create}>
       <label>Key name<input required maxLength={120} value={name} onChange={event => setName(event.target.value)}/></label>
       <button className="primary" disabled={pending || !name.trim()}>Create API key</button>
@@ -461,4 +548,4 @@ function Keys({api, keys, refresh, onError}: {api: Api; keys: Key[]; refresh: ()
   </>;
 }
 
-createRoot(document.getElementById('root')!).render(<App/>);
+createRoot(document.getElementById('root')!).render(<BrowserRouter><NuqsAdapter><App/></NuqsAdapter></BrowserRouter>);

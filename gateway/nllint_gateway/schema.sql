@@ -131,6 +131,37 @@ CREATE TABLE IF NOT EXISTS trace_runs (
     FOREIGN KEY (user_id,run_id) REFERENCES runs(user_id,id)
 );
 CREATE INDEX IF NOT EXISTS trace_runs_by_run ON trace_runs (run_id);
+-- One row per outbound attempt. The result is appended in a separate transaction.
+CREATE TABLE IF NOT EXISTS provider_requests (
+    user_id bigint NOT NULL DEFAULT nllint_user_id() REFERENCES users(id),
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    provider_version_id bigint NOT NULL,
+    trace_id text NOT NULL,
+    stage text NOT NULL CHECK (stage IN ('file','ranges','adjudication')),
+    run_ids bigint[] NOT NULL CHECK (cardinality(run_ids) > 0),
+    question_count integer CHECK (question_count > 0),
+    request_options jsonb NOT NULL,
+    started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (user_id,id),
+    FOREIGN KEY (user_id,provider_version_id) REFERENCES provider_versions(user_id,id),
+    FOREIGN KEY (user_id,trace_id) REFERENCES traces(user_id,id)
+);
+CREATE INDEX IF NOT EXISTS provider_requests_runs ON provider_requests USING gin (run_ids);
+CREATE INDEX IF NOT EXISTS provider_requests_recent ON provider_requests (user_id,started_at);
+CREATE TABLE IF NOT EXISTS provider_request_results (
+    user_id bigint NOT NULL DEFAULT nllint_user_id() REFERENCES users(id),
+    request_id bigint PRIMARY KEY,
+    finished_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    http_status integer CHECK (http_status BETWEEN 100 AND 599),
+    transport_error text,
+    upstream_request_id text,
+    resolved_model text,
+    resolved_service_tier text,
+    usage jsonb,
+    CHECK ((http_status IS NULL) <> (transport_error IS NULL)),
+    FOREIGN KEY (user_id,request_id) REFERENCES provider_requests(user_id,id)
+);
+
 CREATE TABLE IF NOT EXISTS questions (
     user_id bigint NOT NULL DEFAULT nllint_user_id() REFERENCES users(id),
     run_id bigint NOT NULL,
@@ -148,6 +179,17 @@ CREATE TABLE IF NOT EXISTS questions (
         OR (stage <> 'adjudication' AND start_line = 0 AND end_line = 0)
     )
 );
+ALTER TABLE questions ADD COLUMN IF NOT EXISTS provider_request_id bigint;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT FROM pg_constraint WHERE conrelid='questions'::regclass AND conname='questions_provider_request_fk'
+    ) THEN
+        ALTER TABLE questions ADD CONSTRAINT questions_provider_request_fk
+            FOREIGN KEY (user_id,provider_request_id) REFERENCES provider_requests(user_id,id);
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS range_candidates (
     user_id bigint NOT NULL DEFAULT nllint_user_id() REFERENCES users(id),
     run_id bigint NOT NULL,
@@ -244,7 +286,8 @@ DECLARE
 BEGIN
     FOREACH relation IN ARRAY ARRAY[
         'projects','api_keys','streams','texts','file_rules','traces','provider_versions',
-        'runs','trace_runs','questions','range_candidates','range_annotations'
+        'runs','trace_runs','questions','range_candidates','range_annotations',
+        'provider_requests','provider_request_results'
     ] LOOP
         EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', relation);
         EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', relation);
@@ -258,4 +301,27 @@ BEGIN
 END $$;
 GRANT DELETE ON range_annotations TO nllint_runtime;
 GRANT USAGE ON SEQUENCE projects_id_seq, api_keys_id_seq, file_rules_id_seq,
-    provider_versions_id_seq, runs_id_seq TO nllint_runtime;
+    provider_versions_id_seq, runs_id_seq, provider_requests_id_seq TO nllint_runtime;
+
+-- Project routing is the editable pointer. Snapshots and their request ledger are append-only.
+CREATE OR REPLACE FUNCTION nllint_reject_provider_history_change() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog
+AS $$
+BEGIN
+    RAISE EXCEPTION '% is append-only', TG_TABLE_NAME USING ERRCODE = '55000';
+END $$;
+
+DO $$
+DECLARE
+    relation text;
+BEGIN
+    FOREACH relation IN ARRAY ARRAY['provider_versions','provider_requests','provider_request_results'] LOOP
+        EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON public.%I FROM nllint_runtime', relation);
+        EXECUTE format('DROP TRIGGER IF EXISTS provider_history_append_only ON public.%I', relation);
+        EXECUTE format(
+            'CREATE TRIGGER provider_history_append_only BEFORE UPDATE OR DELETE OR TRUNCATE
+             ON public.%I FOR EACH STATEMENT EXECUTE FUNCTION public.nllint_reject_provider_history_change()',
+             relation
+        );
+    END LOOP;
+END $$;

@@ -72,6 +72,12 @@ if WEB.is_dir():
         return FileResponse(WEB / "favicon.ico", media_type="image/x-icon")
 
     @app.get("/", include_in_schema=False)
+    @app.get("/traces", include_in_schema=False)
+    @app.get("/traces/{path:path}", include_in_schema=False)
+    @app.get("/pipelines", include_in_schema=False)
+    @app.get("/pipelines/{path:path}", include_in_schema=False)
+    @app.get("/api-keys", include_in_schema=False)
+    @app.get("/find-ranges/{path:path}", include_in_schema=False)
     async def index():
         return FileResponse(
             WEB / "index.html",

@@ -1,8 +1,9 @@
 from pathlib import PurePosixPath
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+RangeServiceTier = Literal["flex", "fast"]
 ProjectName = Annotated[str, Field(min_length=1, max_length=200)]
 OperatorLabel = Annotated[str, Field(min_length=1, max_length=120)]
 

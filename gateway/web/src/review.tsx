@@ -1,7 +1,11 @@
-import {useCallback, useEffect, useRef, useState} from 'react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import type {PointerEvent as ReactPointerEvent} from 'react';
+import {CodeBlock, CodeExcerpt, CodeTokens, highlightLines, languageForPath, SyntaxPicker} from './code';
+import type {HighlightedLine, Language} from './code';
+import {Link} from 'react-router';
+import {findRangesPath, rangeParam} from './navigation';
 import {Api, label, probability, rangeText} from './api';
-import type {Cell, History, Label, Mode, Range, Run, Trace} from './api';
+import type {Cell, History, Label, Mode, ProviderHistory, Range, Run, Trace} from './api';
 
 export function Verdict({decision, confidence}: {decision: Label; confidence?: number | null}) {
   return <span className={`badge ${decision === null ? 'neutral' : decision ? 'violation' : 'clear'}`}>
@@ -48,12 +52,13 @@ function FileCell({cell, save, busy}: {cell: Cell; save: SetFileLabel; busy: boo
       <button type="button" className="quiet" disabled={busy}
         onClick={() => save(cell, false, true)}>Mark all {cell.ranges.filter(range => range.candidate).length} snippets as no violation</button>}
     {cell.file_decision === false && cell.file_label === true &&
-      <a href={`/?findRun=${cell.run_id}`} target="_blank" rel="noopener noreferrer">Find and annotate ranges ↗</a>}
+      <a href={findRangesPath(cell.run_id)} target="_blank" rel="noopener noreferrer">Find and annotate ranges ↗</a>}
   </>;
 }
 
-export function Matrix({traces, mode, open, save, saveRange, busy, onRule}: {
-  traces: Trace[]; mode: Mode; open: OpenReview; save: SetFileLabel; saveRange: (cell: Cell, range: Range, decision: Label) => void; busy: boolean; onRule: (rule: string) => void;
+export function Matrix({traces, mode, open, openFile, save, saveRange, busy, onRule, languages, traceLink}: {
+  traces: Trace[]; mode: Mode; open: OpenReview; openFile: (trace: Trace, cell: Cell) => void;
+  languages: Partial<Record<string, Language>>; traceLink: (trace: Trace) => string; save: SetFileLabel; saveRange: (cell: Cell, range: Range, decision: Label) => void; busy: boolean; onRule: (rule: string) => void;
 }) {
   if (!traces.length) return <div className="empty">No traces match these filters.</div>;
   const columns = [...new Set(traces.flatMap(trace => trace.cells.map(cell => cell.rule_path)))].sort();
@@ -63,7 +68,9 @@ export function Matrix({traces, mode, open, save, saveRange, busy, onRule}: {
         title={column}>{column.split('/').at(-1)}</button><small>{column}</small></th>)}</tr></thead>
     <tbody>{traces.map(trace => <tr key={trace.id}>
       <th scope="row">
-        <a className="file-name" href={`/?traceId=${trace.id}`}>{trace.file_path}</a>
+        <Link className="file-name" to={traceLink(trace)}>{trace.file_path}</Link>
+        {trace.cells[0] && <button type="button" className="text-button"
+          aria-label={`View file ${trace.file_path}`} onClick={() => openFile(trace, trace.cells[0])}>View file</button>}
         <small>{trace.project} · {trace.key_name}</small>
         <small>{new Date(trace.created_at).toLocaleString()}</small>
       </th>
@@ -76,7 +83,7 @@ export function Matrix({traces, mode, open, save, saveRange, busy, onRule}: {
             {mode === 'adjudication' ? <div className="snippet-stack">
               {cell.ranges.slice(0, 8).map(range => <div className="snippet-card" key={rangeText(range)}>
                 <RangeChip range={range} open={() => open(trace, cell, range)}/>
-                {range.preview && <pre>{range.preview}</pre>}
+                {range.preview && <CodeBlock source={range.preview} language={languages[trace.id] ?? languageForPath(trace.file_path)}/>}
                 <LabelButtons active={range.annotation} disabled={busy} save={decision => saveRange(cell, range, decision)}/>
               </div>)}
               {cell.ranges.length > 8 && <button type="button" className="text-button" onClick={() => open(trace, cell)}>
@@ -93,19 +100,18 @@ export function Matrix({traces, mode, open, save, saveRange, busy, onRule}: {
   </table></div>;
 }
 
-export function SourceRanges({run, selected, select, save, busy}: {
-  run: Run; selected: Range | undefined; select: (range: Range) => void;
-  save: (start: number, end: number, decision: Label) => void; busy: boolean;
+function SourceRanges({lines, ranges, selected, select, save, busy, title}: {
+  lines: HighlightedLine[]; ranges: Range[]; selected?: Range; select?: (range: Range) => void;
+  title: string; save?: (start: number, end: number, decision: Label) => void; busy?: boolean;
 }) {
   const [adding, setAdding] = useState(false);
   const [selection, setSelection] = useState<{start: number; end: number}>();
   const drag = useRef<number | null>(null);
-  const lines = run.source ? run.source.replace(/\r?\n$/, '').split(/\r?\n/) : [];
   const source = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (selected) source.current?.querySelector(`[data-line="${selected.start}"]`)?.scrollIntoView({block: 'nearest'});
-  }, [selected]);
+    if (selected) source.current?.querySelector(`[data-line="${selected.start}"]`)?.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  }, [selected?.start, lines.length]);
 
   function move(event: ReactPointerEvent) {
     if (drag.current === null) return;
@@ -116,12 +122,12 @@ export function SourceRanges({run, selected, select, save, busy}: {
 
   return <section className="source-panel">
     <div className="source-tools">
-      <h3>Source</h3>
-      <button type="button" onClick={() => {setAdding(!adding); setSelection(undefined);}}>
+      <h3>{title}</h3>
+      {save && <button type="button" onClick={() => {setAdding(!adding); setSelection(undefined);}}>
         {adding ? 'Cancel' : '+ Add range'}
-      </button>
+      </button>}
     </div>
-    {adding && <div className="range-instructions">
+    {adding && save && <div className="range-instructions">
       {selection ? <>
         <strong>{rangeText(selection)}</strong>
         <LabelButtons active={null} disabled={busy} save={decision => {
@@ -141,17 +147,18 @@ export function SourceRanges({run, selected, select, save, busy}: {
     </div>}
     <div className={`source ${adding ? 'adding' : ''}`} ref={source} onPointerMove={move}
       onPointerUp={() => {drag.current = null;}} onPointerCancel={() => {drag.current = null;}}>
-      {lines.map((text, index) => {
+      {lines.map((tokens, index) => {
         const line = index + 1;
-        const regions = run.ranges.filter(range => range.start <= line && range.end >= line);
+        const regions = ranges.filter(range => range.start <= line && range.end >= line);
         const top = regions.find(range => selected && range.start === selected.start && range.end === selected.end) ?? regions[0];
         const marked = selection && selection.start <= line && line <= selection.end;
+        const focused = selected && selected.start <= line && line <= selected.end;
         const status = top?.model_decision == null ? 'neutral' : top.model_decision ? 'violation' : 'clear';
         const agreement = top?.annotation != null && top.model_decision !== null
           ? top.annotation === top.model_decision ? 'agree' : 'disagree' : '';
         return <div key={line} data-line={line}
-          className={`source-line ${top ? status : ''} ${agreement} ${marked ? 'marked' : ''} ${top && !top.candidate ? 'human-only' : ''}`}>
-          <button type="button" className="gutter" aria-label={`Line ${line}`} tabIndex={top && !adding ? 0 : -1}
+          className={`source-line ${top ? status : ''} ${agreement} ${marked ? 'marked' : ''} ${focused ? 'focused-range' : ''} ${top && !top.candidate ? 'human-only' : ''}`}>
+          {save ? <button type="button" className="gutter" aria-label={`Line ${line}`} tabIndex={top && !adding ? 0 : -1}
             onPointerDown={event => {
               if (!adding || event.button !== 0) return;
               event.preventDefault();
@@ -159,9 +166,10 @@ export function SourceRanges({run, selected, select, save, busy}: {
               drag.current = line;
               setSelection({start: line, end: line});
             }}
-            onClick={() => {if (!adding && top) select(top);}}>{line}</button>
-          <code>{text || ' '}</code>
-          {top && line === top.start && !adding && <div className="line-actions">
+            onClick={() => {if (!adding && top) select?.(top);}}>{line}</button>
+            : <span className="gutter" aria-hidden="true">{line}</span>}
+          <code className="syntax-code">{tokens.length ? <CodeTokens line={tokens}/> : ' '}</code>
+          {save && top && line === top.start && !adding && <div className="line-actions">
             <button type="button" disabled={busy} title="Mark no violation" aria-label={`Mark ${rangeText(top)} no violation`}
               onClick={() => save(top.start, top.end, false)}>×</button>
             <button type="button" disabled={busy} title="Mark violates" aria-label={`Mark ${rangeText(top)} violates`}
@@ -175,21 +183,41 @@ export function SourceRanges({run, selected, select, save, busy}: {
   </section>;
 }
 
-export function ReviewPanel({api, initial, trace, mode, initialRange, close, refresh, saveFile, busy, canGoPrevious, canGoNext, goAdjacent}: {
-  api: Api; initial: Cell; trace: Trace; mode: Mode; initialRange?: Range; close: () => void;
+export function ReviewPanel({api, initial, trace, mode, close, refresh, saveFile, busy, canGoPrevious, canGoNext, goAdjacent, language, onLanguage, onMode, selectedRange, onRange, showContext, onContext, showRuleHistory, onRuleHistory, showProviderHistory, onProviderHistory}: {
+  api: Api; initial: Cell; trace: Trace; mode: Mode; close: () => void;
   refresh: () => void; saveFile: SetFileLabel; busy: boolean;
   canGoPrevious: boolean; canGoNext: boolean; goAdjacent: (direction: number) => void;
+  language: Language; onLanguage: (language: Language) => void;
+  onMode: (mode: Mode) => void; selectedRange: string | null; onRange: (range: Range) => void;
+  showContext: boolean; onContext: (show: boolean) => void;
+  showRuleHistory: boolean; onRuleHistory: (show: boolean) => void;
+  showProviderHistory: boolean; onProviderHistory: (show: boolean) => void;
 }) {
   const [run, setRun] = useState<Run>();
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
-  const [selected, setSelected] = useState(initialRange);
   const [history, setHistory] = useState<History[]>();
-  const [view, setView] = useState<Mode>(mode);
+  const [providerHistory, setProviderHistory] = useState<ProviderHistory>();
   const [reload, setReload] = useState(0);
   const swipe = useRef<{x: number; y: number} | null>(null);
 
-  useEffect(() => setView(mode), [mode]);
+  useEffect(() => {
+    if (!showRuleHistory) return;
+    let active = true;
+    api.json<History[]>(`/history?${new URLSearchParams({project_id: String(trace.project_id), rule: initial.rule_path})}`)
+      .then(result => {if (active) setHistory(result);})
+      .catch(error => {if (active) setError(error.message);});
+    return () => {active = false;};
+  }, [api, showRuleHistory, trace.project_id, initial.rule_path]);
+
+  useEffect(() => {
+    if (!showProviderHistory) return;
+    let active = true;
+    api.json<ProviderHistory>(`/runs/${initial.run_id}/provider-requests`)
+      .then(result => {if (active) setProviderHistory(result);})
+      .catch(error => {if (active) setError(error.message);});
+    return () => {active = false;};
+  }, [api, showProviderHistory, initial.run_id]);
 
   useEffect(() => {
     let active = true;
@@ -208,17 +236,19 @@ export function ReviewPanel({api, initial, trace, mode, initialRange, close, ref
     }).catch(error => setError(error.message)).finally(() => setPending(false));
   }
 
-  const range = selected && run?.ranges.find(item => rangeText(item) === rangeText(selected)) || run?.ranges[0];
+  const source = run?.source ?? '';
+  const sourceLines = useMemo(() => highlightLines(source, language), [source, language]);
+  const range = run?.ranges.find(item => rangeParam(item) === selectedRange) ?? run?.ranges[0];
   const index = run && range ? run.ranges.indexOf(range) : -1;
   const step = useCallback((amount: number) => {
-    if (run?.ranges[index + amount]) setSelected(run.ranges[index + amount]);
+    if (run?.ranges[index + amount]) onRange(run.ranges[index + amount]);
     else goAdjacent(amount);
-  }, [run, index, goAdjacent]);
+  }, [run, index, goAdjacent, onRange]);
 
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
       if (event.key === 'Escape') close();
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || view !== 'adjudication') return;
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || mode !== 'adjudication') return;
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
         event.preventDefault();
         step(event.key === 'ArrowLeft' ? -1 : 1);
@@ -226,15 +256,15 @@ export function ReviewPanel({api, initial, trace, mode, initialRange, close, ref
     };
     window.addEventListener('keydown', handle);
     return () => window.removeEventListener('keydown', handle);
-  }, [close, step, view]);
+  }, [close, step, mode]);
 
   return <aside className="review-panel" aria-label="Review">
     <div className="panel-heading"><div><small>{trace.project} / {trace.file_path}</small><h2>{initial.rule_id}</h2></div>
       <button type="button" className="close" aria-label="Close review" onClick={close}>×</button></div>
     <div className="segmented">
-      <button type="button" aria-pressed={view === 'files'} onClick={() => setView('files')}>File</button>
-      <button type="button" aria-pressed={view === 'adjudication'} onClick={() => setView('adjudication')}>Adjudication</button>
-      <button type="button" aria-pressed={view === 'ranges'} onClick={() => setView('ranges')}>Ranges</button>
+      <button type="button" aria-pressed={mode === 'files'} onClick={() => onMode('files')}>File</button>
+      <button type="button" aria-pressed={mode === 'adjudication'} onClick={() => onMode('adjudication')}>Adjudication</button>
+      <button type="button" aria-pressed={mode === 'ranges'} onClick={() => onMode('ranges')}>Ranges</button>
     </div>
     {error && <p role="alert" className="error">{error}</p>}
     {!run && !error && <p role="status">Loading review…</p>}
@@ -246,21 +276,44 @@ export function ReviewPanel({api, initial, trace, mode, initialRange, close, ref
             .catch(error => setError(error.message)).finally(() => setPending(false));
         }}>Retry</button>
       </div>}
-      {view === 'files' && <div className="file-review"><FileCell cell={run} save={saveFile} busy={busy}/></div>}
-      <details className="rule-text" open={view === 'adjudication'}><summary>{run.rule_path}</summary><pre>{run.rule}</pre></details>
+      <SyntaxPicker language={language} onChange={onLanguage}/>
+      {mode === 'files' && <>
+        <div className="file-review"><FileCell cell={run} save={saveFile} busy={busy}/></div>
+        <SourceRanges lines={sourceLines} ranges={[]} title={run.file_path}/>
+      </>}
+      <details className="rule-text" open={mode === 'adjudication'}><summary>{run.rule_path}</summary><CodeBlock source={run.rule} language="markdown"/></details>
       <div className="panel-links">
         {run.langfuse_url && <a href={run.langfuse_url} target="_blank" rel="noreferrer">Langfuse ↗</a>}
-        <button className="text-button" type="button" onClick={() => {
-          if (history) {setHistory(undefined); return;}
-          api.json<History[]>(`/history?${new URLSearchParams({project_id: String(trace.project_id), rule: initial.rule_path})}`)
-            .then(setHistory).catch(error => setError(error.message));
-        }}>{history ? 'Hide rule history' : 'Rule history'}</button>
+        <button className="text-button" type="button" onClick={() => onRuleHistory(!showRuleHistory)}>
+          {showRuleHistory ? 'Hide rule history' : 'Rule history'}
+        </button>
+        <button className="text-button" type="button" onClick={() => onProviderHistory(!showProviderHistory)}>
+          {showProviderHistory ? 'Hide provider requests' : 'Provider requests'}
+        </button>
       </div>
-      {history?.map(item => <details key={`${item.project}-${item.rule_hash}`}>
+      {showProviderHistory && providerHistory && <section>
+        <p>Settings version {providerHistory.settings_version_id}</p>
+        {(['decision', 'ranges'] as const).map(kind => <div key={kind}>
+          <strong>{kind === 'decision' ? 'Decisions' : 'Ranges'}</strong>
+          {' · '}{providerHistory.settings[kind].model}
+          {providerHistory.settings[kind].service_tier && ` · ${providerHistory.settings[kind].service_tier}`}
+          <small> {providerHistory.settings[kind].base_url}</small>
+        </div>)}
+        {providerHistory.requests.length === 0 && <p className="muted">No provider requests recorded for this run.</p>}
+        {providerHistory.requests.map(item => <details key={item.id}>
+          <summary>{({file: 'File decision', ranges: 'Range discovery', adjudication: 'Adjudication'})[item.stage]}
+            {' · '}{item.reused ? 'Reused request' : (item.http_status ?? item.transport_error ?? 'Outcome pending')}
+            {' · '}{new Date(item.started_at).toLocaleString()}</summary>
+          {item.resolved_model && <div>Served by {item.resolved_model}{item.resolved_service_tier && ` · ${item.resolved_service_tier}`}</div>}
+          {item.question_count !== null && <div>Questions sent {item.question_count}</div>}
+          {item.usage && <CodeBlock source={JSON.stringify(item.usage, null, 2)} language="json"/>}
+        </details>)}
+      </section>}
+      {showRuleHistory && history?.map(item => <details key={`${item.project}-${item.rule_hash}`}>
         <summary>{item.project} · {new Date(item.first_seen).toLocaleDateString()} · {item.rule_hash.slice(0, 8)}</summary>
-        <pre>{item.rule}</pre>
+        <CodeBlock source={item.rule} language="markdown"/>
       </details>)}
-      {view === 'adjudication' && (range ? <div className="adjudication"
+      {mode === 'adjudication' && (range ? <div className="adjudication"
         onPointerDown={event => {swipe.current = {x: event.clientX, y: event.clientY};}}
         onPointerCancel={() => {swipe.current = null;}}
         onPointerUp={event => {
@@ -277,18 +330,23 @@ export function ReviewPanel({api, initial, trace, mode, initialRange, close, ref
         </div>
         {range.candidate ? (range.model_decision === null ? <Stage cell={run}/> :
           <Verdict decision={range.model_decision} confidence={range.confidence}/>) : <span className="badge neutral">Human-added range</span>}
-        <pre className="snippet">{run.source.split(/\r?\n/).slice(range.start - 1, range.end).join('\n')}</pre>
+        <div className="segmented">
+          <button type="button" aria-pressed={!showContext} onClick={() => onContext(false)}>Snippet</button>
+          <button type="button" aria-pressed={showContext} onClick={() => onContext(true)}>In file</button>
+        </div>
+        {showContext
+          ? <SourceRanges lines={sourceLines} ranges={[range]} selected={range} title={run.file_path}/>
+          : <CodeExcerpt lines={sourceLines.slice(range.start - 1, range.end)} className="snippet"/>}
         <LabelButtons active={range.annotation} disabled={pending} save={decision => save(range.start, range.end, decision)}/>
-        <details><summary>Full file context</summary><pre>{run.source}</pre></details>
       </div> : <div className="empty">{run.stage === 'ready' ? 'No candidate ranges' : <Stage cell={run}/>}
-        <button type="button" onClick={() => setView('ranges')}>Open source to add a range</button></div>)}
-      {view === 'ranges' && <>
+        <button type="button" onClick={() => onMode('ranges')}>Open source to add a range</button></div>)}
+      {mode === 'ranges' && <>
         <div className="range-chips">{run.ranges.map(item =>
-          <RangeChip key={rangeText(item)} range={item} open={() => setSelected(item)}/>)}</div>
+          <RangeChip key={rangeText(item)} range={item} open={() => onRange(item)}/>)}</div>
         {range && <div className="range-selection"><strong>{rangeText(range)}</strong>
           <LabelButtons active={range.annotation} disabled={pending} save={decision => save(range.start, range.end, decision)}/>
         </div>}
-        <SourceRanges key={run.run_id} run={run} selected={range} select={setSelected} save={save} busy={pending}/>
+        <SourceRanges lines={sourceLines} ranges={run.ranges} selected={range} select={onRange} save={save} busy={pending} title={run.file_path}/>
       </>}
     </>}
   </aside>;

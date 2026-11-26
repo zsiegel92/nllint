@@ -5,6 +5,9 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+from .contracts import RangeServiceTier
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", extra="ignore", hide_input_in_errors=True
@@ -26,7 +29,8 @@ class Settings(BaseSettings):
     nllint_decision_model: str = "jev-latest"
     openrouter_api_key: SecretStr = Field(min_length=1)
     nllint_range_base_url: str = "https://openrouter.ai/api/v1"
-    nllint_range_model: str = "openai/gpt-4.1-mini"
+    nllint_range_model: str = "openai/gpt-6-luna"
+    nllint_range_service_tier: RangeServiceTier = "flex"
     nllint_allowed_provider_base_urls: str = ""
     nllint_cache_epoch: str = "1"
     nllint_worker_enabled: bool = True

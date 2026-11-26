@@ -7,6 +7,7 @@ The Rust client sends one file and the rules with local cache misses. It polls p
 | `POST /v1/lint` | Submit a project-relative file path, UTF-8 source, optional project prompt, and rules with IDs, relative paths, and Markdown text. |
 | `GET /v1/lint/{id}` | Poll the trace. A pending response uses HTTP 202. A terminal response is ready or failed. |
 | `GET /v1/sync?project=…&cursor=…` | Return the processing version and changed file–rule annotation revisions for this API key and project. |
+| `GET /api/runs/{id}/provider-requests` | Read the run’s settings snapshot and upstream requests as a signed-in operator. |
 | `/docs` | FastAPI request and operator route reference. |
 
 ## Ownership
@@ -25,6 +26,20 @@ The local SQLite cache scopes entries to the gateway URL, API key, project, file
 
 The gateway retains submitted source and rule text in Postgres for review and exports. Source goes to the project’s configured decision provider and OpenRouter-compatible range endpoint. Langfuse records stage observations with rule identifiers and model outputs.
 
+
+## Projects and API keys
+
+The client sends a project ID with each lint request. Set `project_id` in project settings to use a stable name across checkouts. Without it, the CLI combines the project folder name with a short hash of its canonical path. The gateway creates the project on the first lint. Create it in Pipelines first if you want to configure models beforehand.
+
+API keys authenticate clients. A key can submit work for multiple projects, and a project can receive work from multiple keys. Creating a key does not create a project. A rule history parent includes revisions of matching relative rule paths in the child's Rule history. Rule selection and model routing still come from the project's own settings.
+
+## Provider history and usage
+
+Editing a project changes the routing used for future runs. Existing runs reference encrypted, append-only `provider_versions` snapshots. PostgreSQL rejects updates, deletes, and truncation of snapshots and provider history.
+
+Each outbound decision batch, range request, and adjudication batch gets a `provider_requests` row before the call. The gateway appends its outcome and any provider-reported usage in `provider_request_results`, independently of the job transaction, so retries and failed validation do not erase usage. A request with no outcome has unconfirmed usage. Cache hits refer to the original request rather than generating a second usage event.
+
+The **Provider requests** panel shows the recorded settings and usage. It exposes model and tier information while keeping credentials encrypted. For future billing, count each request ID once and use the provider's cost and usage fields where supplied. Runs created before request logging still have their settings snapshot. Historical provider charges cannot be reconstructed from those settings.
 
 ## Extension points
 

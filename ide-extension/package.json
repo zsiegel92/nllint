@@ -1,6 +1,7 @@
 {
 	"name": "nllint-vscode",
 	"displayName": "NLLint",
+	"icon": "assets/sheep.png",
 	"description": "Native VS Code diagnostics from NLLint.",
 	"version": "0.1.0",
 	"publisher": "zsiegel92",

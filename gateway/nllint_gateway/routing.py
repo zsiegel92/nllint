@@ -6,7 +6,7 @@ from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from pydantic import Field, SecretStr
 
-from .contracts import Strict
+from .contracts import RangeServiceTier, Strict
 
 
 class RouteEdit(Strict):
@@ -16,9 +16,13 @@ class RouteEdit(Strict):
     reset: bool = False
 
 
+class RangeRouteEdit(RouteEdit):
+    service_tier: RangeServiceTier | None = None
+
+
 class RoutingEdit(Strict):
     decision: RouteEdit = Field(default_factory=RouteEdit)
-    ranges: RouteEdit = Field(default_factory=RouteEdit)
+    ranges: RangeRouteEdit = Field(default_factory=RangeRouteEdit)
 
 
 def normalize_base(base: str) -> str:
@@ -39,7 +43,9 @@ def normalize_base(base: str) -> str:
 
 class Routing:
     def __init__(self, settings):
-        self.secret = settings.nllint_provider_encryption_key.get_secret_value().encode()
+        self.secret = (
+            settings.nllint_provider_encryption_key.get_secret_value().encode()
+        )
         self.crypto = Fernet(self.secret)
         self.defaults = {
             "decision": {
@@ -50,6 +56,7 @@ class Routing:
             "ranges": {
                 "base_url": normalize_base(settings.nllint_range_base_url),
                 "model": settings.nllint_range_model,
+                "service_tier": settings.nllint_range_service_tier,
                 "api_key": settings.openrouter_api_key.get_secret_value(),
             },
         }
@@ -91,12 +98,29 @@ class Routing:
             self.secret, self.serialize([3, self.epoch, values]), "sha256"
         ).hex()
 
+    async def snapshot(self, conn, project_id: int, version: str, routes) -> int:
+        query = "SELECT id FROM provider_versions WHERE project_id=$1 AND version=$2"
+        existing = await conn.fetchval(query, project_id, version)
+        if existing is not None:
+            return existing
+        await conn.execute(
+            """
+            INSERT INTO provider_versions(project_id,version,routing) VALUES ($1,$2,$3)
+            ON CONFLICT DO NOTHING
+            """,
+            project_id,
+            version,
+            self.encode(routes),
+        )
+        return await conn.fetchval(query, project_id, version)
+
     def view(self, stored):
         overrides = self.decode(stored)
         return {
             kind: {
                 "base_url": route["base_url"],
                 "model": route["model"],
+                **({"service_tier": route["service_tier"]} if kind == "ranges" else {}),
                 "custom_key": "api_key" in overrides.get(kind, {}),
                 "overridden": bool(overrides.get(kind)),
             }
@@ -127,6 +151,8 @@ class Routing:
                 updated["base_url"] = base
             if change.model is not None:
                 updated["model"] = change.model
+            if isinstance(change, RangeRouteEdit) and change.service_tier is not None:
+                updated["service_tier"] = change.service_tier
             if change.api_key is not None:
                 updated["api_key"] = change.api_key.get_secret_value()
             if (

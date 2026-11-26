@@ -77,30 +77,7 @@ async def lint(body: LintRequest, request: Request, key_id: int = Depends(client
             version,
         )
         if created:
-            provider_id = await conn.fetchval(
-                """
-                SELECT id FROM provider_versions WHERE project_id=$1 AND version=$2
-            """,
-                project_id,
-                version,
-            )
-            if provider_id is None:
-                await conn.execute(
-                    """
-                    INSERT INTO provider_versions(project_id,version,routing) VALUES ($1,$2,$3)
-                    ON CONFLICT DO NOTHING
-                """,
-                    project_id,
-                    version,
-                    routing.encode(routes),
-                )
-                provider_id = await conn.fetchval(
-                    """
-                    SELECT id FROM provider_versions WHERE project_id=$1 AND version=$2
-                """,
-                    project_id,
-                    version,
-                )
+            provider_id = await routing.snapshot(conn, project_id, version, routes)
             texts = {source_hash: body.source, prompt_hash: body.prompt}
             texts.update({rule_hash: text for _, _, rule_hash, text in rules})
             await conn.executemany(

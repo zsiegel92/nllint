@@ -34,9 +34,27 @@ export type Trace = {
 };
 export type Key = {id: number; name: string; prefix: string; revoked_at: string | null};
 export type Project = {id: number; name: string; parent: string | null; rules: number};
-export type Provider = {base_url: string; model: string; custom_key: boolean; overridden: boolean};
+export type RangeServiceTier = 'flex' | 'fast';
+export type Provider = {base_url: string; model: string; service_tier?: RangeServiceTier; custom_key: boolean; overridden: boolean};
 export type Routing = {decision: Provider; ranges: Provider};
-export type ProviderEdit = {base_url?: string; model?: string; api_key?: string; reset?: boolean};
+export type ProviderEdit = {base_url?: string; model?: string; service_tier?: RangeServiceTier; api_key?: string; reset?: boolean};
+export type ProviderHistory = {
+  settings_version_id: number;
+  settings: Record<'decision' | 'ranges', {base_url: string; model: string; service_tier?: string}>;
+  requests: {
+    id: number;
+    stage: 'file' | 'ranges' | 'adjudication';
+    started_at: string;
+    finished_at: string | null;
+    reused: boolean;
+    http_status: number | null;
+    transport_error: string | null;
+    question_count: number | null;
+    resolved_model: string | null;
+    resolved_service_tier: string | null;
+    usage: Record<string, unknown> | null;
+  }[];
+};
 export type History = {project: string; rule_hash: string; rule: string; first_seen: string};
 
 export class Api {
