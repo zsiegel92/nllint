@@ -3,9 +3,11 @@ import os
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security.utils import get_authorization_scheme_param
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers
 from starlette.routing import Route
 
 from . import agentic, auth, headless, lint, review
@@ -28,14 +30,17 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.routing = Routing(settings)
     async with AsyncExitStack() as stack:
-        mcp = headless.make_mcp()
-        app.state.mcp_app = mcp.streamable_http_app()
-        await stack.enter_async_context(mcp.session_manager.run())
         db = await Database.open(settings)
         app.state.db = db
         stack.push_async_callback(db.close)
         app.state.providers = Providers(settings)
         stack.push_async_callback(app.state.providers.close)
+        app.state.review_services = review.ReviewServices(
+            db, settings, app.state.routing, app.state.providers
+        )
+        mcp = headless.make_mcp(app.state.review_services)
+        app.state.mcp_app = mcp.streamable_http_app()
+        await stack.enter_async_context(mcp.session_manager.run())
         if settings.nllint_worker_enabled:
             worker = Worker(db, app.state.providers, settings, app.state.routing)
             await stack.enter_async_context(db.listen(worker.wake))
@@ -97,16 +102,20 @@ if WEB.is_dir():
 
 class McpTransport:
     async def __call__(self, scope, receive, send):
-        request = Request(scope, receive=receive)
+        headers = Headers(scope=scope)
+        state = scope["app"].state
         # This bearer-only transport is intended for native clients.
-        if request.headers.get("origin") is not None:
+        if "origin" in headers:
             response = JSONResponse(
                 {"detail": "Browser origins are unsupported"}, status_code=403
             )
             await response(scope, receive, send)
             return
         try:
-            await auth.client_key(request, await auth.bearer(request))
+            scheme, token = get_authorization_scheme_param(headers.get("authorization"))
+            actor = await auth.authenticate_key(
+                state.db, state.settings, token if scheme.lower() == "bearer" else None
+            )
         except HTTPException as error:
             response = JSONResponse(
                 {"detail": error.detail},
@@ -115,8 +124,8 @@ class McpTransport:
             )
             await response(scope, receive, send)
             return
-        request.state.mcp_gateway = request.app
-        await request.app.state.mcp_app(scope, receive, send)
+        scope.setdefault("state", {})["principal"] = actor
+        await state.mcp_app(scope, receive, send)
 
 
 app.router.routes.extend(

@@ -117,7 +117,9 @@ class Database:
 
 
 def request_db(request, *, readonly=False):
-    return request.app.state.db.tenant(request.state.user_id, readonly=readonly)
+    return request.app.state.db.tenant(
+        request.state.principal.user_id, readonly=readonly
+    )
 
 
 async def notify_work(conn):

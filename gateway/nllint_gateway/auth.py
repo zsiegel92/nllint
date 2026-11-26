@@ -1,10 +1,12 @@
 import json
 import re
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from dataclasses import dataclass
 from hashlib import sha256
 from hmac import compare_digest, digest
 from secrets import token_urlsafe
 from time import time
+from typing import Literal
 from urllib.parse import urlencode, urlsplit
 
 import httpx
@@ -13,12 +15,22 @@ from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
+from .db import Database
+from .settings import Settings
+
 bearer = HTTPBearer(auto_error=False)
 session_router = APIRouter(prefix="/api/session")
 SESSION = "nllint_session"
 OAUTH_STATE = "nllint_github_state"
 CALLBACK = "/api/session/github/callback"
 SESSION_SECONDS = 12 * 60 * 60
+
+
+@dataclass(frozen=True)
+class Principal:
+    user_id: int
+    origin: Literal["api", "webapp", "ide"]
+    key_id: int | None = None
 
 
 def digest_key(value: str) -> str:
@@ -29,36 +41,45 @@ def mint_key() -> str:
     return f"nllint_{token_urlsafe(32)}"
 
 
-async def client_key(
-    request: Request, auth: HTTPAuthorizationCredentials | None = Depends(bearer)
-) -> int:
-    if (
-        auth is not None
-        and auth.credentials.startswith("nllint_")
-        and len(auth.credentials) == 50
-    ):
-        row = await request.app.state.db.lookup_key(digest_key(auth.credentials))
-        if row and request.app.state.settings.allows(row["user_id"]):
-            request.state.user_id = row["user_id"]
-            return row["key_id"]
+async def authenticate_key(
+    db: Database, settings: Settings, token: str | None
+) -> Principal:
+    if token and token.startswith("nllint_") and len(token) == 50:
+        row = await db.lookup_key(digest_key(token))
+        if row and settings.allows(row["user_id"]):
+            return Principal(row["user_id"], "api", row["key_id"])
     raise HTTPException(401, "Valid gateway API key required")
 
 
-def sign(value: str, audience: str, request: Request) -> str:
-    key = request.app.state.settings.nllint_session_secret.get_secret_value()
+async def client_key(
+    request: Request, auth: HTTPAuthorizationCredentials | None = Depends(bearer)
+) -> int:
+    state = request.app.state
+    principal = await authenticate_key(
+        state.db, state.settings, auth.credentials if auth else None
+    )
+    request.state.principal = principal
+    assert principal.key_id is not None
+    return principal.key_id
+
+
+def sign(value: str, audience: str, settings: Settings) -> str:
+    key = settings.nllint_session_secret.get_secret_value()
     return digest(key.encode(), f"{audience}:{value}".encode(), "sha256").hex()
 
 
 def pack(claims, audience: str, request: Request) -> str:
     value = urlsafe_b64encode(json.dumps(claims).encode()).decode()
-    return f"{value}.{sign(value, audience, request)}"
+    return f"{value}.{sign(value, audience, request.app.state.settings)}"
 
 
 def unpack(payload: str, audience: str, request: Request):
     if len(payload) > 4096 or "." not in payload:
         return None
     value, mac = payload.rsplit(".", 1)
-    if not compare_digest(mac.encode(), sign(value, audience, request).encode()):
+    if not compare_digest(
+        mac.encode(), sign(value, audience, request.app.state.settings).encode()
+    ):
         return None
     claims = json.loads(urlsafe_b64decode(value))
     return claims if claims["exp"] > time() else None
@@ -78,7 +99,7 @@ async def operator(
         )
     ):
         await request.app.state.db.register(0)
-        request.state.user_id = 0
+        request.state.principal = Principal(0, "api")
         return 0
     session = unpack(request.cookies.get(SESSION, ""), "session", request)
     if session is not None and settings.allows(session["id"]):
@@ -87,8 +108,7 @@ async def operator(
             and request.headers.get("X-NLLint-UI") != "1"
         ):
             raise HTTPException(403, "Missing control-plane header")
-        request.state.web_session = True
-        request.state.user_id = session["id"]
+        request.state.principal = Principal(session["id"], "webapp")
         return session["id"]
     raise HTTPException(401, "Sign in required")
 

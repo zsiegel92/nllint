@@ -645,6 +645,21 @@ class GatewayTest(unittest.TestCase):
                 )
             )
             self.assertEqual(foreign["traces"], [])
+            foreign_mcp = self.json(
+                client.post(
+                    "/mcp",
+                    headers={**mcp_headers, **other_key},
+                    json={
+                        **mcp_request,
+                        "params": {
+                            "name": "search_traces",
+                            "arguments": {"query": {"trace_id": trace_id}},
+                        },
+                    },
+                )
+            )
+            self.assertEqual(foreign_mcp["result"]["structuredContent"]["traces"], [])
+
             self.wait(client, other_key, self.submit(client, other_key, data))
             self.assertNotEqual(
                 self.json(client.get("/api/traces"))["traces"][0]["project_id"],

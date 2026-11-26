@@ -1,12 +1,13 @@
 import json
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import Field
 from fastapi.responses import StreamingResponse
 
-from .auth import digest_key, mint_key, operator, sign
+from .auth import Principal, digest_key, mint_key, operator, sign
 from .contracts import (
     FileAnnotation,
     Strict,
@@ -16,10 +17,21 @@ from .contracts import (
     RangeAnnotation,
     source_lines,
 )
-from .db import notify_work, request_db
-from .routing import RoutingEdit
+from .db import Database, notify_work, request_db
+from .providers import Providers
+from .routing import Routing, RoutingEdit
+from .settings import Settings
 
 router = APIRouter(prefix="/api", dependencies=[Depends(operator)])
+
+
+@dataclass(frozen=True)
+class ReviewServices:
+    db: Database
+    settings: Settings
+    routing: Routing
+    providers: Providers
+
 
 FILE_POSITIVE_POINTS = 1
 RANGE_POSITIVE_POINTS = 2
@@ -409,9 +421,17 @@ async def traces(
 
 @router.post("/traces/search")
 async def search_traces(body: TraceSearch, request: Request):
+    return await find_traces(
+        body, request.state.principal, request.app.state.review_services
+    )
+
+
+async def find_traces(
+    body: TraceSearch, principal: Principal, services: ReviewServices
+):
     limit = body.limit
     rule = body.rule
-    async with request_db(request, readonly=True) as conn:
+    async with services.db.tenant(principal.user_id, readonly=True) as conn:
         rows = await search_rows(conn, body)
         page = rows[:limit]
         cells = await conn.fetch(
@@ -461,7 +481,13 @@ async def search_traces(body: TraceSearch, request: Request):
 
 @router.get("/traces/{trace_id}/source")
 async def trace_source(trace_id: str, request: Request):
-    async with request_db(request, readonly=True) as conn:
+    return await read_source(
+        trace_id, request.state.principal, request.app.state.review_services
+    )
+
+
+async def read_source(trace_id: str, principal: Principal, services: ReviewServices):
+    async with services.db.tenant(principal.user_id, readonly=True) as conn:
         row = await conn.fetchrow(
             """
             SELECT t.file_path, s.body AS source
@@ -509,7 +535,13 @@ async def review_ranges(conn, ids):
 
 @router.get("/runs/{run_id}")
 async def detail(run_id: int, request: Request):
-    async with request_db(request, readonly=True) as conn:
+    return await read_run(
+        run_id, request.state.principal, request.app.state.review_services
+    )
+
+
+async def read_run(run_id: int, principal: Principal, services: ReviewServices):
+    async with services.db.tenant(principal.user_id, readonly=True) as conn:
         row = await conn.fetchrow(
             f"""
             {CELL} WHERE r.id=$1 AND tr.trace_id=r.batch_id
@@ -528,8 +560,8 @@ async def detail(run_id: int, request: Request):
         )
         ranges = (await review_ranges(conn, [run_id]))[run_id]
         labels = await agent_labels(conn, [run_id])
-    settings = request.app.state.settings
-    trace = request.app.state.providers.trace_id(row["batch_id"])
+    settings = services.settings
+    trace = services.providers.trace_id(row["batch_id"])
     langfuse_url = None
     if settings.langfuse_project_id:
         langfuse_url = f"{settings.langfuse_base_url.rstrip('/')}/project/{settings.langfuse_project_id}/traces/{trace}"
@@ -653,12 +685,12 @@ def review_cell(row, labels):
     }
 
 
-def annotation_kind(request, body):
+def annotation_kind(principal: Principal, body):
     if body.labeler_type:
         return body.labeler_type
     if body.labeler_identity:
         return body.labeler_identity.type
-    return "HUMAN" if getattr(request.state, "web_session", False) else "BOT"
+    return "HUMAN" if principal.origin == "webapp" else "BOT"
 
 
 def protect_annotation(raw):
@@ -669,33 +701,41 @@ def protect_annotation(raw):
         )
 
 
-def annotation_identity(request, body, target, kind):
+def annotation_identity(principal: Principal, settings: Settings, body, target, kind):
     identity = body.labeler_identity
-    user_id = request.state.user_id
+    user_id = principal.user_id
     if kind == "HUMAN" and identity and identity.user_id not in (None, user_id):
         raise HTTPException(422, "The human labeler must be the authenticated user")
     if body.decision is None:
         return None
     data = identity.model_dump(exclude_none=True) if identity else {"type": kind}
-    data["origin"] = getattr(request.state, "annotation_origin", "api")
+    data["origin"] = "ide" if principal.origin == "ide" else "api"
     if kind == "HUMAN":
         data["user_id"] = user_id
-        if getattr(request.state, "web_session", False):
+        if principal.origin == "webapp":
             data["origin"] = "webapp"
             data["signature"] = sign(
                 json.dumps([user_id, target, body.decision]),
                 "human-labeled-via-webapp",
-                request,
+                settings,
             )
     return json.dumps(data)
 
 
 @router.put("/pairs/{pair_id}/file")
 async def annotate_file(pair_id: int, body: FileAnnotation, request: Request):
-    settings = request.app.state.settings
-    kind = annotation_kind(request, body)
-    labeler = annotation_identity(request, body, ["file", pair_id], kind)
-    async with request_db(request) as conn:
+    return await write_file_annotation(
+        pair_id, body, request.state.principal, request.app.state.review_services
+    )
+
+
+async def write_file_annotation(
+    pair_id: int, body: FileAnnotation, principal: Principal, services: ReviewServices
+):
+    settings = services.settings
+    kind = annotation_kind(principal, body)
+    labeler = annotation_identity(principal, settings, body, ["file", pair_id], kind)
+    async with services.db.tenant(principal.user_id) as conn:
         pair = await lock_pair(conn, pair_id)
         if kind == "BOT":
             if pair["file_label"] is not None:
@@ -722,7 +762,7 @@ async def annotate_file(pair_id: int, body: FileAnnotation, request: Request):
         project_settings = await conn.fetchval(
             "SELECT routing FROM projects WHERE id=$1", pair["project_id"]
         )
-        routing = request.app.state.routing
+        routing = services.routing
         version = routing.version(routing.effective(project_settings))
         changed = pair["file_label"] != body.decision or decode_identity(
             pair["labeler_identity"]
@@ -794,7 +834,8 @@ async def annotate_file(pair_id: int, body: FileAnnotation, request: Request):
                         row["start_line"],
                         row["end_line"],
                         annotation_identity(
-                            request,
+                            principal,
+                            settings,
                             body,
                             ["range", pair_id, row["start_line"], row["end_line"]],
                             kind,
@@ -872,11 +913,23 @@ async def retry_run(conn, run_id):
 
 @router.put("/pairs/{pair_id}/range")
 async def annotate_range(pair_id: int, body: RangeAnnotation, request: Request):
-    kind = annotation_kind(request, body)
-    labeler = annotation_identity(
-        request, body, ["range", pair_id, body.start, body.end], kind
+    return await write_range_annotation(
+        pair_id, body, request.state.principal, request.app.state.review_services
     )
-    async with request_db(request) as conn:
+
+
+async def write_range_annotation(
+    pair_id: int, body: RangeAnnotation, principal: Principal, services: ReviewServices
+):
+    kind = annotation_kind(principal, body)
+    labeler = annotation_identity(
+        principal,
+        services.settings,
+        body,
+        ["range", pair_id, body.start, body.end],
+        kind,
+    )
+    async with services.db.tenant(principal.user_id) as conn:
         pair = await lock_pair(conn, pair_id)
         source = await conn.fetchval(
             "SELECT body FROM texts WHERE (key_id,hash)=($1,$2)",

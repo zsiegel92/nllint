@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -6,7 +7,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
 
 from . import review
-from .auth import client_key
+from .auth import Principal, client_key
 from .contracts import BotIdentity, FileAnnotation, RangeAnnotation, Strict
 from .db import request_db
 from .lint import digest
@@ -48,8 +49,7 @@ async def editor_range(
         )
     if body.end < body.start:
         raise HTTPException(422, "End must be at or after start")
-    request.state.annotation_origin = "ide"
-    return await review.annotate_range(
+    return await review.write_range_annotation(
         pair_id,
         RangeAnnotation(
             start=body.start,
@@ -57,11 +57,12 @@ async def editor_range(
             decision=body.decision,
             labeler_type="HUMAN",
         ),
-        request,
+        replace(request.state.principal, origin="ide"),
+        request.app.state.review_services,
     )
 
 
-def make_mcp():
+def make_mcp(services: review.ReviewServices):
     mcp = FastMCP(
         "NLLint",
         stateless_http=True,
@@ -72,26 +73,29 @@ def make_mcp():
         instructions="Search lint traces, read source and run details, then record bot annotations by pair ID.",
     )
 
-    def request(ctx):
+    def principal(ctx: Context) -> Principal:
         original = ctx.request_context.request
-        if original is None or not hasattr(original.state, "mcp_gateway"):
+        actor = (
+            getattr(original.state, "principal", None) if original is not None else None
+        )
+        if not isinstance(actor, Principal) or actor.key_id is None:
             raise HTTPException(401, "Valid gateway API key required")
-        return Request({**original.scope, "app": original.state.mcp_gateway})
+        return actor
 
     @mcp.tool()
     async def search_traces(query: review.TraceSearch, ctx: Context) -> dict[str, Any]:
         """Search traces using project, path, source text, rule, confidence, issue filters and sorting."""
-        return await review.search_traces(query, request(ctx))
+        return await review.find_traces(query, principal(ctx), services)
 
     @mcp.tool()
     async def read_source(trace_id: str, ctx: Context) -> dict[str, Any]:
         """Read the source stored for a trace."""
-        return await review.trace_source(trace_id, request(ctx))
+        return await review.read_source(trace_id, principal(ctx), services)
 
     @mcp.tool()
     async def read_run(run_id: int, ctx: Context) -> dict[str, Any]:
         """Read the target file, rule, pipeline results and annotations for a run."""
-        return await review.detail(run_id, request(ctx))
+        return await review.read_run(run_id, principal(ctx), services)
 
     @mcp.tool()
     async def annotate_file(
@@ -102,7 +106,7 @@ def make_mcp():
         identity: BotIdentity | None = None,
     ) -> dict[str, bool | None]:
         """Record a bot file decision. True confirms a violation, false rejects it, and null clears the label."""
-        return await review.annotate_file(
+        return await review.write_file_annotation(
             pair_id,
             FileAnnotation(
                 decision=decision,
@@ -110,7 +114,8 @@ def make_mcp():
                 labeler_type="BOT",
                 labeler_identity=identity,
             ),
-            request(ctx),
+            principal(ctx),
+            services,
         )
 
     @mcp.tool()
@@ -123,7 +128,7 @@ def make_mcp():
         identity: BotIdentity | None = None,
     ) -> dict[str, bool | None]:
         """Record a bot decision for an inclusive, one-based range. Null clears the label."""
-        return await review.annotate_range(
+        return await review.write_range_annotation(
             pair_id,
             RangeAnnotation(
                 start=start,
@@ -132,7 +137,8 @@ def make_mcp():
                 labeler_type="BOT",
                 labeler_identity=identity,
             ),
-            request(ctx),
+            principal(ctx),
+            services,
         )
 
     return mcp
