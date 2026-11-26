@@ -27,6 +27,8 @@ The local SQLite cache scopes entries to the gateway URL, API key, project, file
 
 The gateway retains submitted source and rule text in Postgres for review and exports. Source goes to the project’s configured decision provider and OpenRouter-compatible range endpoint. Langfuse records stage observations with rule identifiers and model outputs.
 
+Choose **All lint data** in the JSONL export menu to download one record per trace and rule. It includes source, rule text, prompt, model decisions and confidence, candidate ranges, and any human labels. An unset human label is `null`. The export respects the project, API key, rule, and trace scope. Open **All traces** and clear those filters to export across projects.
+
 
 ## Projects and API keys
 

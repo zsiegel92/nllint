@@ -1,6 +1,7 @@
 """Run against a disposable Postgres database initialized with schema.sql."""
 
 import asyncio
+import json
 import os
 import unittest
 from secrets import randbelow
@@ -142,6 +143,14 @@ class GatewayTest(unittest.TestCase):
             first, second = trace["cells"]
             self.assertTrue(first["ranges_checked"])
             self.assertFalse(second["ranges_checked"])
+            response = client.get("/api/export/all", params={"trace_id": trace_id})
+            records = [json.loads(line) for line in response.text.splitlines()]
+            positive, negative = sorted(records, key=lambda row: row["rule_id"])
+            self.assertEqual(positive["source"], data["source"])
+            self.assertEqual(positive["ranges"][0]["snippet"], "b\nc")
+            self.assertIsNone(positive["ranges"][0]["annotation"])
+            self.assertFalse(negative["questions"][0]["decision"])
+            self.assertEqual(negative["ranges"], [])
             self.assertEqual(first["ranges"][0]["preview"], "b\nc")
             self.assertEqual(ready[1]["ranges"], [])
             for issue in ("file-range-positives", "adjudicated-positives"):
@@ -269,6 +278,18 @@ class GatewayTest(unittest.TestCase):
             )
             self.assertTrue(since["changes"][0]["has_violation"])
             self.assertIn('"snippet": "d"', client.get("/api/export/adjudication").text)
+            response = client.get(
+                "/api/export/all",
+                params={"trace_id": trace_id, "rule_version": second["rule_version"]},
+            )
+            annotated = json.loads(response.text)
+            self.assertTrue(annotated["file_label"])
+            self.assertTrue(
+                any(
+                    region["annotation"] and not region["candidate"]
+                    for region in annotated["ranges"]
+                )
+            )
             self.assertIn(
                 '"coverage": "reviewed-positives"',
                 client.get("/api/export/ranges").text,
@@ -341,6 +362,7 @@ class GatewayTest(unittest.TestCase):
                 404,
             )
             self.assertEqual(client.get("/api/export/adjudication").text, "")
+            self.assertEqual(client.get("/api/export/all").text, "")
             self.wait(client, other_key, self.submit(client, other_key, data))
             self.assertNotEqual(
                 self.json(client.get("/api/traces"))["traces"][0]["project_id"],

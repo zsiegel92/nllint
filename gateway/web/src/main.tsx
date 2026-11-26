@@ -4,7 +4,7 @@ import {createRoot} from 'react-dom/client';
 import {useQueryStates} from 'nuqs';
 import {BrowserRouter, Link, matchRoutes, useLocation, useNavigate} from 'react-router';
 import {NuqsAdapter} from 'nuqs/adapters/react-router/v7';
-import {closedReview, findRangesPath, gatewayQuery, issueLabels, modelsPath, modes, navigation, rangeParam, routes, sectionPaths, tracePath} from './navigation';
+import {closedReview, exportKinds, findRangesPath, gatewayQuery, issueLabels, modelsPath, navigation, rangeParam, routes, sectionPaths, tracePath} from './navigation';
 import {Api} from './api';
 import type {Cell, Key, Label, Mode, Project, Provider, ProviderEdit, Range, ReviewMode, Routing, Run, Trace} from './api';
 import type {Section} from './navigation';
@@ -304,8 +304,15 @@ function Workspace({api, logout, section, project, traceId, models}: {
     try {
       const params = new URLSearchParams(scope);
       if (traceId) params.set('trace_id', traceId);
-      const response = await api.request(`/export/${exportKind}?${params}`);
       const link = document.createElement('a');
+      const path = `/export/${exportKind}?${params}`;
+      if (exportKind === 'all') {
+        link.href = '/api' + path;
+        link.download = 'nllint-all.jsonl';
+        link.click();
+        return;
+      }
+      const response = await api.request(path);
       link.href = URL.createObjectURL(await response.blob());
       link.download = `nllint-${exportKind}.jsonl`;
       link.click();
@@ -355,12 +362,13 @@ function Workspace({api, logout, section, project, traceId, models}: {
             <div className="export" role="group" aria-label="Export dataset">
               <label className="sr-only" htmlFor="dataset">Dataset to export</label>
               <select id="dataset" value={exportKind} onChange={event => {
-                const value = modes.find(mode => mode === event.target.value);
+                const value = exportKinds.find(kind => kind === event.target.value);
                 if (value) void setQuery({exportKind: value});
               }}>
                 <option value="files">File decisions</option>
                 <option value="ranges">Range examples</option>
                 <option value="adjudication">Adjudication examples</option>
+                <option value="all">All lint data</option>
               </select>
               <button type="button" onClick={download}>Export JSONL</button>
             </div>

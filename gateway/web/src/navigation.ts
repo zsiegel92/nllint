@@ -23,6 +23,7 @@ export function tracePath(project?: string, traceId?: string) {
 export const modelsPath = (projectId: number | string) => `/pipelines/${projectId}/models`;
 export const findRangesPath = (runId: number | string) => `/find-ranges/${runId}`;
 export const modes = ['files', 'ranges', 'adjudication'] as const;
+export const exportKinds = [...modes, 'all'] as const;
 export const reviewModes = ['files', 'ranges'] as const;
 export const issueLabels = {
   all: 'All traces',
@@ -45,7 +46,7 @@ export const navigation = {
   rules: parseAsArrayOf(parseAsString).withDefault([]),
   sort: parseAsStringLiteral(['relevance', 'newest']).withDefault('relevance'),
   page: parseAsInteger.withDefault(0),
-  exportKind: parseAsStringLiteral(modes).withDefault('adjudication'),
+  exportKind: parseAsStringLiteral(exportKinds).withDefault('adjudication'),
   run: parseAsInteger,
   reviewTrace: parseAsString,
   range: parseAsString,

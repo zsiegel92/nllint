@@ -704,9 +704,54 @@ async def annotate_range(pair_id: int, body: RangeAnnotation, request: Request):
     return {"decision": body.decision}
 
 
+async def all_training_records(request, key_id, project, rule, trace_id, rule_version):
+    query = f"""
+        SELECT tr.trace_id,r.id AS run_id,f.id AS pair_id,r.version AS routing_version,
+               r.provider_version_id,r.stage,r.error,p.name AS project,f.key_id,
+               trace.created_at::text AS trace_created_at,trace.file_path,f.file_hash,
+               tr.rule_id,f.rule_path,f.rule_hash,{RULE_VERSION_ID} AS rule_version,
+               f.prompt_hash,f.file_label,s.body AS source,t.body AS rule,pr.body AS prompt,
+               COALESCE((SELECT jsonb_agg(
+                   jsonb_build_object('stage',q.stage,'start',nullif(q.start_line,0),
+                       'end',nullif(q.end_line,0),'decision',q.decision,'confidence',q.confidence,
+                       'model',q.model,'provider_request_id',q.provider_request_id)
+                   ORDER BY CASE q.stage WHEN 'file' THEN 1 WHEN 'ranges' THEN 2 ELSE 3 END,
+                       q.start_line,q.end_line)
+                   FROM questions q WHERE q.run_id=r.id),'[]'::jsonb)::text AS questions
+        FROM trace_runs tr JOIN traces trace ON trace.id=tr.trace_id
+        JOIN runs r ON r.id=tr.run_id JOIN file_rules f ON f.id=r.pair_id
+        JOIN projects p ON p.id=f.project_id
+        JOIN texts s ON (s.key_id,s.hash)=(f.key_id,f.file_hash)
+        JOIN texts t ON (t.key_id,t.hash)=(f.key_id,f.rule_hash)
+        JOIN texts pr ON (pr.key_id,pr.hash)=(f.key_id,f.prompt_hash)
+        WHERE ($1::bigint IS NULL OR f.key_id=$1) AND ($2::text IS NULL OR p.name=$2)
+        AND ($3::text IS NULL OR f.rule_path=$3) AND ($4::text IS NULL OR tr.trace_id=$4)
+        AND (cardinality($5::text[])=0 OR {RULE_VERSION_ID}=ANY($5::text[]))
+        ORDER BY tr.trace_id,r.id
+    """
+    async with request_db(request, readonly=True) as conn:
+        cursor = await conn.cursor(query, key_id, project, rule, trace_id, rule_version)
+        while rows := await cursor.fetch(100):
+            ranges = await review_ranges(conn, list({row["run_id"] for row in rows}))
+            for row in rows:
+                item = dict(row)
+                item["questions"] = json.loads(item["questions"])
+                lines = source_lines(item["source"])
+                item["ranges"] = [
+                    {
+                        **region,
+                        "snippet": "\n".join(
+                            lines[region["start"] - 1 : region["end"]]
+                        ),
+                    }
+                    for region in ranges[item["run_id"]]
+                ]
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+
+
 @router.get("/export/{kind}")
 async def export(
-    kind: Literal["files", "adjudication", "ranges"],
+    kind: Literal["files", "adjudication", "ranges", "all"],
     request: Request,
     key_id: int | None = None,
     project: str | None = None,
@@ -791,7 +836,9 @@ async def export(
                         )
 
     return StreamingResponse(
-        records(),
+        all_training_records(request, key_id, project, rule, trace_id, rule_version)
+        if kind == "all"
+        else records(),
         media_type="application/x-ndjson",
         headers={"Content-Disposition": f'attachment; filename="nllint-{kind}.jsonl"'},
     )
